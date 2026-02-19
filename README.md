@@ -55,7 +55,7 @@ Resume point = `min(client_last_ack, server_last_delivered)`. Server is authorit
 
 ```
 scl/
-├── session/          # Core: state machine, lifecycle, policy TTLs
+├── session/          # Core: state machine, lifecycle, policy TTLs, token signing
 ├── handshake/        # RESUME protocol logic
 ├── transport/        # Adapter interface every transport must satisfy
 │   └── tcp/          # TCP adapter with message framing
@@ -81,36 +81,42 @@ Sessions are not promises — they expire. Three built-in policies:
 ## Quick Example
 
 ```go
-// --- Server side ---
+// 1. Create a token issuer — secret key never leaves the server.
+//    In production load this from an environment variable or secrets manager.
+issuer, _ := session.NewRandomTokenIssuer()
 
-// 1. Create a session manager (in-memory, or back it with Redis)
+// 2. Create a session manager and handshake handler
 manager := NewSessionManager()
-handler := handshake.NewHandler(manager)
+handler := handshake.NewHandler(manager, issuer)
 
-// 2. Create a session when client first connects
+// 3. Create a session when client first connects
 sess, seq, _ := manager.Create(session.Interactive)
 sess.Transition(session.StateActive)
 
-// 3. Wrap your TCP connection in an adapter
+// 4. Issue a signed token — send this to the client once at session creation.
+//    The client stores it and presents it on every reconnect attempt.
+token := issuer.Issue(sess.ID)
+
+// 5. Wrap your TCP connection in an adapter
 conn, _ := net.Dial("tcp", "localhost:9000")
 adapter := tcp.New(conn)
 
-// 4. Send messages — seq numbers assigned automatically
+// 6. Send messages — seq numbers assigned automatically
 adapter.Send(transport.Message{
     Seq:     seq.Next(),
     Payload: []byte("hello"),
 })
 
-// 5. When connection drops, mark session disconnected
+// 7. When connection drops, mark session disconnected
 handler.Disconnect(sess.ID)
 
 // --- On reconnect ---
 
-// 6. Client sends RESUME
+// 8. Client sends RESUME with its signed token
 result := handler.Resume(handshake.ResumeRequest{
     SessionID:         sess.ID,
     LastAckFromServer: lastAck,
-    ResumeToken:       sess.ID,
+    ResumeToken:       token, // HMAC-SHA256 signed — session ID alone is not enough
     RequestedAt:       time.Now(),
 })
 
@@ -154,15 +160,16 @@ Core protocol is complete and tested:
 - [x] Session state machine with lifecycle transitions
 - [x] Monotonic message sequencing with sliding window deduplication
 - [x] RESUME handshake with resume point negotiation
+- [x] HMAC-SHA256 signed resume tokens with constant-time verification
 - [x] TCP transport adapter with message framing
 - [x] End-to-end integration test proving disconnect and resume
 - [x] Working example in `examples/basic/`
-- [x] Cryptographic resume token signing
 
 In progress:
 
 - [ ] WebSocket transport adapter
 - [ ] Session persistence beyond in-memory
+- [ ] GitHub Actions CI
 
 ---
 
