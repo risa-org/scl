@@ -431,7 +431,6 @@ One implementation, two consumers, no copies.
 Added as a user convenience, not a core requirement. SCL's job is the
 protocol. The store is the simplest possible starting point for anyone
 building on top of it.
-```
 
 ---
 
@@ -614,6 +613,28 @@ After: one call, zero possible bugs
 
 examples/basic/main.go updated to use Sender throughout.
 README updated with Sender in project structure, quick example, and status.
+
+---
+
+### Stage 17 — Fix WebSocket Disconnect Signal
+
+**Commit:** `fix: treat StatusGoingAway as clean close in WebSocket adapter`
+
+**Problem:**
+TestWebSocketDisconnectSignal was failing. When the client closed,
+the server received ReasonNetworkError instead of ReasonClosedClean.
+
+The nhooyr/websocket library surfaces remote closes as StatusGoingAway
+(1001) rather than StatusNormalClosure (1000) depending on shutdown
+timing. The original check only matched StatusNormalClosure, so
+StatusGoingAway fell through to the network error branch.
+
+**Fix:**
+signalDisconnect now checks for both StatusNormalClosure and
+StatusGoingAway before treating a disconnect as a network error.
+Both codes mean "closed cleanly" — the original check was too narrow.
+
+**Tests:** All 62 passing across 9 packages.
 
 ---
 
