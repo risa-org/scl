@@ -2,62 +2,17 @@ package integration
 
 import (
 	"net"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/risa-org/scl/handshake"
 	"github.com/risa-org/scl/session"
+	"github.com/risa-org/scl/store/memory"
 	"github.com/risa-org/scl/transport"
 	tcpadapter "github.com/risa-org/scl/transport/tcp"
 )
 
-// issuer is shared across all integration tests.
 var issuer = session.NewTokenIssuer([]byte("integration-test-secret"))
-
-// ------------------------------------------------------------
-// SessionManager
-// ------------------------------------------------------------
-
-type entry struct {
-	sess *session.Session
-	seq  *session.Sequencer
-}
-
-type SessionManager struct {
-	mu      sync.RWMutex
-	entries map[string]*entry
-}
-
-func newSessionManager() *SessionManager {
-	return &SessionManager{entries: make(map[string]*entry)}
-}
-
-func (m *SessionManager) Create(policy session.Policy) (*session.Session, *session.Sequencer, error) {
-	sess, err := session.NewSession(policy)
-	if err != nil {
-		return nil, nil, err
-	}
-	seq := session.NewSequencer()
-	m.mu.Lock()
-	m.entries[sess.ID] = &entry{sess: sess, seq: seq}
-	m.mu.Unlock()
-	return sess, seq, nil
-}
-
-func (m *SessionManager) Get(sessionID string) (*session.Session, *session.Sequencer, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	e, ok := m.entries[sessionID]
-	if !ok {
-		return nil, nil, false
-	}
-	return e.sess, e.seq, true
-}
-
-// ------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------
 
 func connPair(t *testing.T) (*tcpadapter.Adapter, *tcpadapter.Adapter) {
 	t.Helper()
@@ -65,15 +20,11 @@ func connPair(t *testing.T) (*tcpadapter.Adapter, *tcpadapter.Adapter) {
 	return tcpadapter.New(serverConn), tcpadapter.New(clientConn)
 }
 
-// ------------------------------------------------------------
-// Tests
-// ------------------------------------------------------------
-
 func TestFullSessionLifecycle(t *testing.T) {
-	manager := newSessionManager()
-	handler := handshake.NewHandler(manager, issuer)
+	store := memory.New()
+	handler := handshake.NewHandler(store, issuer)
 
-	sess, seq, err := manager.Create(session.Interactive)
+	sess, seq, err := store.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -115,16 +66,15 @@ func TestFullSessionLifecycle(t *testing.T) {
 }
 
 func TestResumeAfterDisconnect(t *testing.T) {
-	manager := newSessionManager()
-	handler := handshake.NewHandler(manager, issuer)
+	store := memory.New()
+	handler := handshake.NewHandler(store, issuer)
 
-	sess, seq, err := manager.Create(session.Interactive)
+	sess, seq, err := store.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
 	sess.Transition(session.StateActive)
 
-	// issue token at session creation — client stores this
 	token := issuer.Issue(sess.ID)
 
 	server, client := connPair(t)
@@ -200,10 +150,10 @@ func TestResumeAfterDisconnect(t *testing.T) {
 }
 
 func TestForgedTokenRejected(t *testing.T) {
-	manager := newSessionManager()
-	handler := handshake.NewHandler(manager, issuer)
+	store := memory.New()
+	handler := handshake.NewHandler(store, issuer)
 
-	sess, _, err := manager.Create(session.Interactive)
+	sess, _, err := store.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -225,10 +175,10 @@ func TestForgedTokenRejected(t *testing.T) {
 }
 
 func TestExpiredSessionResumeRejected(t *testing.T) {
-	manager := newSessionManager()
-	handler := handshake.NewHandler(manager, issuer)
+	store := memory.New()
+	handler := handshake.NewHandler(store, issuer)
 
-	sess, _, err := manager.Create(session.Interactive)
+	sess, _, err := store.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
