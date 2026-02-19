@@ -363,9 +363,38 @@ This is the runtime glue between the handshake and the session layer.
 **File:** `README.md`
 **Commit:** `docs: add README with problem statement, architecture, and usage example`
 
-Covers: what it is, why it exists, how it works, project structure,
-session policies, quick usage example, how to run tests, what it is not,
-and current status checklist. Sharp and honest — no overselling.
+Covers: what it is, why it exists, how it works, project structure, session policies, quick usage example, how to run tests, what it is not, and current status checklist.
+
+---
+
+### Stage 8 — Basic Example
+**File:** `examples/basic/main.go`
+**Commit:** `feat: basic example showing full connect, disconnect, and resume flow`
+
+Runnable program demonstrating the complete flow with terminal output at
+every step. Sequence numbers visible: 1-4 pre-disconnect, 5-7 post-resume.
+Continuous across the boundary — exactly what the project promises.
+
+---
+
+### Stage 9 — HMAC Resume Token Signing
+**Issue:** #1
+**Branch:** `fix/issue-1-hmac-resume-token`
+**File:** `session/token.go`
+**Commit:** `fix: replace plaintext token with HMAC-SHA256 signed resume tokens (closes #1)`
+**Tests:** 6 new token tests + 1 new integration test (TestForgedTokenRejected), all passing
+
+**What changed:**
+- `session/token.go` — TokenIssuer with Issue() and Verify()
+- `handshake/handshake.go` — Handler now takes a TokenIssuer, uses Verify() instead of ==
+- `integration/integration_test.go` — uses real tokens, added TestForgedTokenRejected
+- `examples/basic/main.go` — uses NewRandomTokenIssuer, shows token in output
+
+**Security improvement:**
+Before: token == session ID. Anyone who observed traffic could forge a RESUME.
+After: token = HMAC-SHA256(secret, session_id). Secret never leaves the server.
+Knowing the session ID alone is not enough to hijack a session.
+Constant-time comparison prevents timing attacks.
 
 ---
 

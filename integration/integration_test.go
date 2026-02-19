@@ -12,10 +12,11 @@ import (
 	tcpadapter "github.com/risa-org/scl/transport/tcp"
 )
 
+// issuer is shared across all integration tests.
+var issuer = session.NewTokenIssuer([]byte("integration-test-secret"))
+
 // ------------------------------------------------------------
-// SessionManager — simple in-memory store that ties together
-// session creation, sequencer management, and lookup.
-// Glue between the handshake and the session layer.
+// SessionManager
 // ------------------------------------------------------------
 
 type entry struct {
@@ -29,27 +30,21 @@ type SessionManager struct {
 }
 
 func newSessionManager() *SessionManager {
-	return &SessionManager{
-		entries: make(map[string]*entry),
-	}
+	return &SessionManager{entries: make(map[string]*entry)}
 }
 
-// Create makes a new session and stores it.
 func (m *SessionManager) Create(policy session.Policy) (*session.Session, *session.Sequencer, error) {
 	sess, err := session.NewSession(policy)
 	if err != nil {
 		return nil, nil, err
 	}
 	seq := session.NewSequencer()
-
 	m.mu.Lock()
 	m.entries[sess.ID] = &entry{sess: sess, seq: seq}
 	m.mu.Unlock()
-
 	return sess, seq, nil
 }
 
-// Get satisfies the handshake.SessionStore interface.
 func (m *SessionManager) Get(sessionID string) (*session.Session, *session.Sequencer, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -64,8 +59,6 @@ func (m *SessionManager) Get(sessionID string) (*session.Session, *session.Seque
 // Helpers
 // ------------------------------------------------------------
 
-// connPair returns two connected TCP adapters via an in-memory pipe.
-// No real network ports needed — fast and self-contained.
 func connPair(t *testing.T) (*tcpadapter.Adapter, *tcpadapter.Adapter) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
@@ -76,25 +69,20 @@ func connPair(t *testing.T) (*tcpadapter.Adapter, *tcpadapter.Adapter) {
 // Tests
 // ------------------------------------------------------------
 
-// TestFullSessionLifecycle tests the happy path:
-// connect → send messages → disconnect → verify state
 func TestFullSessionLifecycle(t *testing.T) {
 	manager := newSessionManager()
-	handler := handshake.NewHandler(manager)
+	handler := handshake.NewHandler(manager, issuer)
 
-	// create a session and activate it
 	sess, seq, err := manager.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
 	sess.Transition(session.StateActive)
 
-	// connect client and server over in-memory TCP
 	server, client := connPair(t)
 	defer server.Close()
 	defer client.Close()
 
-	// send three messages from client to server
 	for i := uint64(1); i <= 3; i++ {
 		err := client.Send(transport.Message{
 			Seq:     seq.Next(),
@@ -105,7 +93,6 @@ func TestFullSessionLifecycle(t *testing.T) {
 		}
 	}
 
-	// receive and validate all three on server side
 	for i := uint64(1); i <= 3; i++ {
 		select {
 		case msg := <-server.Receive():
@@ -118,35 +105,30 @@ func TestFullSessionLifecycle(t *testing.T) {
 		}
 	}
 
-	// simulate disconnect
 	err = handler.Disconnect(sess.ID)
 	if err != nil {
 		t.Fatalf("disconnect failed: %v", err)
 	}
-
 	if sess.State != session.StateDisconnected {
 		t.Errorf("expected Disconnected, got %v", sess.State)
 	}
 }
 
-// TestResumeAfterDisconnect tests the full RESUME flow:
-// connect → send → disconnect → reconnect → RESUME → continue
-// This is the core guarantee of the entire project.
 func TestResumeAfterDisconnect(t *testing.T) {
 	manager := newSessionManager()
-	handler := handshake.NewHandler(manager)
+	handler := handshake.NewHandler(manager, issuer)
 
-	// create and activate session
 	sess, seq, err := manager.Create(session.Interactive)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
 	sess.Transition(session.StateActive)
 
-	// first connection
+	// issue token at session creation — client stores this
+	token := issuer.Issue(sess.ID)
+
 	server, client := connPair(t)
 
-	// send 5 messages — simulate real traffic before disconnect
 	for i := 0; i < 5; i++ {
 		client.Send(transport.Message{
 			Seq:     seq.Next(),
@@ -154,7 +136,6 @@ func TestResumeAfterDisconnect(t *testing.T) {
 		})
 	}
 
-	// drain server side — server receives and validates all 5
 	for i := 0; i < 5; i++ {
 		select {
 		case msg := <-server.Receive():
@@ -164,28 +145,20 @@ func TestResumeAfterDisconnect(t *testing.T) {
 		}
 	}
 
-	// record what server last delivered before disconnect
 	lastDeliveredBeforeDisconnect := seq.LastDelivered()
 
-	// simulate abrupt disconnect — drop both sides
 	client.Close()
 	server.Close()
-
-	// mark session as disconnected in the state machine
 	handler.Disconnect(sess.ID)
 
-	// --- reconnection ---
-
-	// new TCP connection, same session identity
 	server2, client2 := connPair(t)
 	defer server2.Close()
 	defer client2.Close()
 
-	// client sends RESUME — proving it owns the session
 	result := handler.Resume(handshake.ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: lastDeliveredBeforeDisconnect,
-		ResumeToken:       sess.ID,
+		ResumeToken:       token,
 		RequestedAt:       time.Now(),
 	})
 
@@ -199,7 +172,6 @@ func TestResumeAfterDisconnect(t *testing.T) {
 		t.Errorf("expected ReconnectCount 1, got %d", sess.ReconnectCount)
 	}
 
-	// send post-resume messages on the new connection
 	for i := 0; i < 3; i++ {
 		err := client2.Send(transport.Message{
 			Seq:     seq.Next(),
@@ -210,7 +182,6 @@ func TestResumeAfterDisconnect(t *testing.T) {
 		}
 	}
 
-	// receive post-resume messages — sequence continues uninterrupted
 	for i := 0; i < 3; i++ {
 		select {
 		case msg := <-server2.Receive():
@@ -223,18 +194,14 @@ func TestResumeAfterDisconnect(t *testing.T) {
 		}
 	}
 
-	// sequence numbers must be continuous — 5 pre + 3 post = 8 total
-	// no gaps, no resets, no duplicates
 	if seq.LastDelivered() != 8 {
-		t.Errorf("expected lastDelivered 8 (5 pre + 3 post), got %d", seq.LastDelivered())
+		t.Errorf("expected lastDelivered 8, got %d", seq.LastDelivered())
 	}
 }
 
-// TestExpiredSessionResumeRejected proves TTL enforcement is real —
-// expired sessions cannot be resumed under any circumstances.
-func TestExpiredSessionResumeRejected(t *testing.T) {
+func TestForgedTokenRejected(t *testing.T) {
 	manager := newSessionManager()
-	handler := handshake.NewHandler(manager)
+	handler := handshake.NewHandler(manager, issuer)
 
 	sess, _, err := manager.Create(session.Interactive)
 	if err != nil {
@@ -243,12 +210,35 @@ func TestExpiredSessionResumeRejected(t *testing.T) {
 	sess.Transition(session.StateActive)
 	sess.Transition(session.StateDisconnected)
 
-	// backdate to simulate TTL exceeded
+	result := handler.Resume(handshake.ResumeRequest{
+		SessionID:   sess.ID,
+		ResumeToken: "forged-token",
+		RequestedAt: time.Now(),
+	})
+
+	if result.Accepted {
+		t.Error("expected forged token to be rejected")
+	}
+	if result.Reason != handshake.ReasonInvalidToken {
+		t.Errorf("expected reason %s, got %s", handshake.ReasonInvalidToken, result.Reason)
+	}
+}
+
+func TestExpiredSessionResumeRejected(t *testing.T) {
+	manager := newSessionManager()
+	handler := handshake.NewHandler(manager, issuer)
+
+	sess, _, err := manager.Create(session.Interactive)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	sess.Transition(session.StateActive)
+	sess.Transition(session.StateDisconnected)
 	sess.CreatedAt = time.Now().Add(-10 * time.Minute)
 
 	result := handler.Resume(handshake.ResumeRequest{
 		SessionID:   sess.ID,
-		ResumeToken: sess.ID,
+		ResumeToken: issuer.Issue(sess.ID),
 		RequestedAt: time.Now(),
 	})
 
