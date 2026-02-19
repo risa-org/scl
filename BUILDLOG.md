@@ -435,6 +435,28 @@ building on top of it.
 
 ---
 
+### Stage 12 — WebSocket Transport Adapter
+**Issue:** #6
+**Branch:** `feat/issue-6-websocket-adapter`
+**File:** `transport/websocket/websocket.go`
+**Commit:** `feat: WebSocket transport adapter with JSON framing (closes #6)`
+**Tests:** 5 tests, all passing. 47 total across 7 packages.
+**Dependency:** nhooyr.io/websocket — isolated to transport/websocket only.
+Core remains dependency-free.
+
+**Key differences from TCP adapter:**
+- No manual framing — WebSocket has message boundaries built in
+- JSON wire format via wsjson — human readable, easy to debug
+- context.Context based close — idiomatic for WebSocket API
+- Test server uses httptest.NewServer — real HTTP upgrade, no mocks
+
+**What this proves:**
+Same session, same handshake, same sequencer, same interface.
+Only the adapter changed. Transport-agnostic claim is now proven
+in code with two real backends.
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
