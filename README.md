@@ -156,12 +156,12 @@ Core protocol is complete and tested:
 - [x] RESUME handshake with resume point negotiation
 - [x] TCP transport adapter with message framing
 - [x] End-to-end integration test proving disconnect and resume
+- [x] Working example in `examples/basic/`
+- [x] Cryptographic resume token signing
 
 In progress:
 
-- [ ] Working example in `examples/basic/`
 - [ ] WebSocket transport adapter
-- [ ] Cryptographic resume token signing
 - [ ] Session persistence beyond in-memory
 
 ---
