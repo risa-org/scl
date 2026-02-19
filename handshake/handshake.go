@@ -15,11 +15,20 @@ type ResumeRequest struct {
 	RequestedAt       time.Time
 }
 
+// RetransmitMessage carries a message to be resent after resume.
+type RetransmitMessage struct {
+	Seq     uint64
+	Payload []byte
+}
+
 // ResumeResult is what the handshake returns after processing a request.
 type ResumeResult struct {
-	Accepted    bool
-	ResumePoint uint64
-	Reason      string
+	Accepted          bool
+	ResumePoint       uint64
+	Reason            string
+	Retransmit        []RetransmitMessage // messages client missed, in order — may be empty
+	Partial           bool                // true if buffer rolled over and some messages are unrecoverable
+	OldestRecoverable uint64              // if Partial, the oldest seq we can recover from
 }
 
 // Rejection reason constants.
@@ -36,62 +45,48 @@ type SessionStore interface {
 	Get(sessionID string) (*session.Session, *session.Sequencer, bool)
 }
 
+// Flushable is optionally implemented by stores that persist state.
+type Flushable interface {
+	Flush() error
+}
+
 // Handler processes RESUME requests.
-// It holds a reference to the store and the token issuer — stateless per request.
 type Handler struct {
 	store  SessionStore
 	issuer *session.TokenIssuer
 }
 
 // NewHandler creates a handshake handler backed by the given store and token issuer.
-// The issuer is used to verify resume tokens on every reconnect attempt.
 func NewHandler(store SessionStore, issuer *session.TokenIssuer) *Handler {
 	return &Handler{store: store, issuer: issuer}
 }
 
 // Resume processes a reconnect attempt.
-//
-// Steps:
-//  1. Look up the session
-//  2. Check it exists and isn't expired
-//  3. Check it's in Disconnected state
-//  4. Verify the resume token with HMAC
-//  5. Compute resume point = min(client_last_ack, server_last_delivered)
-//  6. Call ResumeTo on the sequencer
-//  7. Transition session Disconnected → Resuming → Active
-//  8. Return result
 func (h *Handler) Resume(req ResumeRequest) ResumeResult {
-	// step 1 — look up session
 	sess, seq, ok := h.store.Get(req.SessionID)
 	if !ok {
 		return reject(ReasonSessionNotFound)
 	}
 
-	// step 2 — check expiry
 	if sess.IsExpired() {
 		return reject(ReasonSessionExpired)
 	}
 
-	// step 3 — must be Disconnected to resume
 	if sess.State != session.StateDisconnected {
 		return reject(ReasonInvalidState)
 	}
 
-	// step 4 — verify token using HMAC, constant-time comparison
 	if err := h.issuer.Verify(sess.ID, req.ResumeToken); err != nil {
 		return reject(ReasonInvalidToken)
 	}
 
-	// step 5 — compute resume point
 	serverLastDelivered := seq.LastDelivered()
 	resumePoint := min(req.LastAckFromServer, serverLastDelivered)
 
-	// step 6 — restore sequencer to agreed resume point
 	if err := seq.ResumeTo(resumePoint); err != nil {
 		return reject(ReasonInvalidResumePoint)
 	}
 
-	// step 7 — transition Disconnected → Resuming → Active
 	if ok := sess.Transition(session.StateResuming); !ok {
 		return reject(ReasonInvalidState)
 	}
@@ -99,17 +94,31 @@ func (h *Handler) Resume(req ResumeRequest) ResumeResult {
 		return reject(ReasonInvalidState)
 	}
 
-	// track reconnect for observability
 	sess.ReconnectCount++
 
-	return ResumeResult{
+	sentMsgs, fullRecovery := seq.Retransmit(resumePoint)
+
+	result := ResumeResult{
 		Accepted:    true,
 		ResumePoint: resumePoint,
+		Partial:     !fullRecovery,
 	}
+
+	if !fullRecovery {
+		result.OldestRecoverable = seq.OldestRecoverable()
+	}
+
+	for _, m := range sentMsgs {
+		result.Retransmit = append(result.Retransmit, RetransmitMessage{
+			Seq:     m.Seq,
+			Payload: m.Payload,
+		})
+	}
+
+	return result
 }
 
 // Disconnect marks a session as disconnected.
-// Called by the transport adapter when it detects a connection drop.
 func (h *Handler) Disconnect(sessionID string) error {
 	sess, _, ok := h.store.Get(sessionID)
 	if !ok {
@@ -123,8 +132,6 @@ func (h *Handler) Disconnect(sessionID string) error {
 		)
 	}
 
-	// if the store supports persistence, flush now.
-	// disconnect is the moment sequencer durability matters most.
 	if f, ok := h.store.(Flushable); ok {
 		if err := f.Flush(); err != nil {
 			return fmt.Errorf("failed to flush store on disconnect: %w", err)
@@ -134,7 +141,6 @@ func (h *Handler) Disconnect(sessionID string) error {
 	return nil
 }
 
-// reject builds a clean rejection result with a reason.
 func reject(reason string) ResumeResult {
 	return ResumeResult{
 		Accepted: false,
@@ -142,17 +148,9 @@ func reject(reason string) ResumeResult {
 	}
 }
 
-// min returns the smaller of two uint64 values.
 func min(a, b uint64) uint64 {
 	if a < b {
 		return a
 	}
 	return b
-}
-
-// Flushable is optionally implemented by stores that persist state.
-// Handler calls Flush() after marking a session disconnected so that
-// sequencer positions are durable before the session goes dark.
-type Flushable interface {
-	Flush() error
 }
