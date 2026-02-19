@@ -326,12 +326,44 @@ lets us always reconstruct exactly one message at a time.
 
 ---
 
+### Stage 6 — Integration Test
+**File:** `integration/integration_test.go`
+**Commit:** `feat: end-to-end integration test proving RESUME across real TCP disconnect`
+**Tests:** 3 tests, all passing first try. First test to exercise the full stack.
+
+**What it does:**
+Wires all layers together into real end-to-end scenarios. No mocks, no fakes
+for the transport — real TCP via net.Pipe(), real session state, real sequencer,
+real handshake. Proves the entire design works as a system.
+
+**Also introduced: SessionManager**
+Concrete in-memory implementation of handshake.SessionStore. Ties together
+session creation, sequencer management, and lookup under a RWMutex.
+This is the runtime glue between the handshake and the session layer.
+
+**Three scenarios tested:**
+
+1. `TestFullSessionLifecycle` — happy path. Connect, send 3 messages,
+   validate delivery, disconnect cleanly. Verifies the basic flow works.
+
+2. `TestResumeAfterDisconnect` — the core guarantee. Send 5 messages,
+   force disconnect, reconnect with RESUME, send 3 more. Proves sequence
+   numbers are continuous: lastDelivered = 8 (5 + 3), no gaps, no resets.
+   This is what the entire project exists to do.
+
+3. `TestExpiredSessionResumeRejected` — TTL enforcement. Backdates session
+   creation by 10 minutes, attempts RESUME, verifies rejection with
+   correct reason code. Expired sessions cannot be resumed, ever.
+
+**No bugs. Clean first run.**
+
+---
+
 ## Up Next
 
-### Stage 6 — Integration Test
-A real end-to-end test: two sides connected over TCP, messages flowing,
-a forced disconnect, and a successful RESUME. The moment the entire
-stack works together for the first time.
+### Stage 7 — README
+The project now works. Time to explain it to the world.
+What it is, why it exists, how to use it, how to run the tests.
 
 ---
 
