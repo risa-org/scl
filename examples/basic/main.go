@@ -9,6 +9,7 @@ import (
 	"github.com/risa-org/scl/session"
 	"github.com/risa-org/scl/store/memory"
 	"github.com/risa-org/scl/transport"
+	"github.com/risa-org/scl/transport/sender"
 	"github.com/risa-org/scl/transport/tcp"
 )
 
@@ -25,14 +26,12 @@ func main() {
 	store := memory.New()
 	handler := handshake.NewHandler(store, issuer)
 
-	// Create a session with Interactive policy (5 min TTL)
 	sess, seq, err := store.Create(session.Interactive)
 	if err != nil {
 		panic(err)
 	}
 	sess.Transition(session.StateActive)
 
-	// Issue signed token — client stores this for reconnect
 	token := issuer.Issue(sess.ID)
 
 	fmt.Printf("Session created\n")
@@ -46,23 +45,24 @@ func main() {
 	fmt.Println("--- First Connection ---")
 
 	serverConn, clientConn := net.Pipe()
-	server := tcp.New(serverConn)
-	client := tcp.New(clientConn)
+	serverAdapter := tcp.New(serverConn)
+	clientSender := sender.New(seq, tcp.New(clientConn))
 
 	received := make(chan transport.Message, 32)
 	go func() {
-		for msg := range server.Receive() {
+		for msg := range serverAdapter.Receive() {
 			received <- msg
 		}
 	}()
 
+	// Send via Sender — seq assignment, delivery, and buffering in one call
 	for i := 0; i < 4; i++ {
-		msg := transport.Message{
-			Seq:     seq.Next(),
-			Payload: []byte(fmt.Sprintf("message %d", i+1)),
+		payload := []byte(fmt.Sprintf("message %d", i+1))
+		seqNum, err := clientSender.Send(payload)
+		if err != nil {
+			panic(err)
 		}
-		client.Send(msg)
-		fmt.Printf("  → sent   seq=%d payload=%q\n", msg.Seq, msg.Payload)
+		fmt.Printf("  → sent   seq=%d payload=%q\n", seqNum, payload)
 	}
 
 	for i := 0; i < 4; i++ {
@@ -84,8 +84,8 @@ func main() {
 	fmt.Println("--- Network Drop ---")
 
 	lastAck := seq.LastDelivered()
-	client.Close()
-	server.Close()
+	clientSender.Adapter().Close()
+	serverAdapter.Close()
 	handler.Disconnect(sess.ID)
 
 	fmt.Printf("  connection dropped\n")
@@ -97,11 +97,11 @@ func main() {
 	fmt.Println("--- Reconnecting ---")
 
 	serverConn2, clientConn2 := net.Pipe()
-	server2 := tcp.New(serverConn2)
-	client2 := tcp.New(clientConn2)
+	serverAdapter2 := tcp.New(serverConn2)
+	clientSender2 := sender.New(seq, tcp.New(clientConn2))
 
 	go func() {
-		for msg := range server2.Receive() {
+		for msg := range serverAdapter2.Receive() {
 			received <- msg
 		}
 	}()
@@ -121,18 +121,31 @@ func main() {
 	fmt.Printf("  resume point: %d\n", result.ResumePoint)
 	fmt.Printf("  session state: %s\n", stateName(sess.State))
 	fmt.Printf("  reconnect count: %d\n", sess.ReconnectCount)
+
+	// retransmit any messages the server sent that the client missed
+	if len(result.Retransmit) > 0 {
+		fmt.Printf("  retransmitting %d missed messages\n", len(result.Retransmit))
+		for _, m := range result.Retransmit {
+			clientSender2.Adapter().Send(transport.Message{Seq: m.Seq, Payload: m.Payload})
+		}
+	} else {
+		fmt.Printf("  no missed messages to retransmit\n")
+	}
+	if result.Partial {
+		fmt.Printf("  WARNING: partial recovery — oldest recoverable seq=%d\n", result.OldestRecoverable)
+	}
 	fmt.Println()
 
 	// --- Continue sending on new connection ---
 	fmt.Println("--- Continuing After Resume ---")
 
 	for i := 0; i < 3; i++ {
-		msg := transport.Message{
-			Seq:     seq.Next(),
-			Payload: []byte(fmt.Sprintf("post-resume message %d", i+1)),
+		payload := []byte(fmt.Sprintf("post-resume message %d", i+1))
+		seqNum, err := clientSender2.Send(payload)
+		if err != nil {
+			panic(err)
 		}
-		client2.Send(msg)
-		fmt.Printf("  → sent   seq=%d payload=%q\n", msg.Seq, msg.Payload)
+		fmt.Printf("  → sent   seq=%d payload=%q\n", seqNum, payload)
 	}
 
 	for i := 0; i < 3; i++ {
@@ -156,9 +169,10 @@ func main() {
 	fmt.Println("Sequence numbers were continuous across the disconnect.")
 	fmt.Println("No gaps. No resets. No duplicates.")
 	fmt.Println("Token was HMAC-signed — session ID alone is not enough to hijack.")
+	fmt.Println("Sender ensured buffer is always consistent with what was delivered.")
 
-	client2.Close()
-	server2.Close()
+	clientSender2.Adapter().Close()
+	serverAdapter2.Close()
 }
 
 func stateName(s session.SessionState) string {

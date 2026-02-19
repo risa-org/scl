@@ -23,7 +23,7 @@ transport lifetime ≠ session identity
 A session survives across multiple underlying connections. The transport changes. The identity doesn't.
 
 **One guarantee:**
-> Ordered, at-most-once message delivery across transient disconnects — within a bounded session lifetime.
+> Ordered, at-most-once message delivery across transient disconnects — within a bounded session lifetime. Missed messages are retransmitted on resume.
 
 ---
 
@@ -43,11 +43,11 @@ When a client reconnects it sends a RESUME request:
 
 ```
 Client → Server:  RESUME { session_id, last_ack, resume_token }
-Server → Client:  RESUME_OK { resume_point }
+Server → Client:  RESUME_OK { resume_point, retransmit_list }
                or RESUME_REJECT { reason }
 ```
 
-Resume point = `min(client_last_ack, server_last_delivered)`. Server is authoritative. Both sides resync from the last point they both agree on. Sequence numbers continue from where they left off — no gaps, no resets, no duplicates.
+Resume point = `min(client_last_ack, server_last_delivered)`. Server is authoritative. Both sides resync from the last point they both agree on. Sequence numbers continue from where they left off — no gaps, no resets, no duplicates. Any messages the client missed are retransmitted from the server's outbound buffer.
 
 ---
 
@@ -58,6 +58,7 @@ scl/
 ├── session/               # Core: state machine, lifecycle, policy TTLs, token signing
 ├── handshake/             # RESUME protocol logic
 ├── transport/             # Adapter interface every transport must satisfy
+│   ├── sender/            # Wraps sequencer + adapter — one call to send, sequence, and buffer
 │   ├── tcp/               # TCP adapter with binary message framing
 │   └── websocket/         # WebSocket adapter with JSON framing
 ├── store/
@@ -103,18 +104,15 @@ sess, seq, _ := store.Create(session.Interactive)
 sess.Transition(session.StateActive)
 
 // 5. Issue a signed token — send this to the client once at session creation.
-//    The client stores it and presents it on every reconnect attempt.
 token := issuer.Issue(sess.ID)
 
-// 6. Wrap your connection in an adapter — TCP or WebSocket
+// 6. Wrap your connection in a Sender — handles seq, delivery, and buffering
 conn, _ := net.Dial("tcp", "localhost:9000")
-adapter := tcp.New(conn)
+s := sender.New(seq, tcp.New(conn))
 
-// 7. Send messages — seq numbers assigned automatically
-adapter.Send(transport.Message{
-    Seq:     seq.Next(),
-    Payload: []byte("hello"),
-})
+// 7. Send messages — one call does everything
+s.Send([]byte("hello"))
+s.Send([]byte("world"))
 
 // 8. When connection drops, mark session disconnected
 handler.Disconnect(sess.ID)
@@ -125,11 +123,19 @@ handler.Disconnect(sess.ID)
 result := handler.Resume(handshake.ResumeRequest{
     SessionID:         sess.ID,
     LastAckFromServer: lastAck,
-    ResumeToken:       token, // HMAC-SHA256 signed — session ID alone is not enough
+    ResumeToken:       token,
     RequestedAt:       time.Now(),
 })
 
 if result.Accepted {
+    // retransmit anything the client missed
+    for _, m := range result.Retransmit {
+        newSender.Adapter().Send(transport.Message{Seq: m.Seq, Payload: m.Payload})
+    }
+    if result.Partial {
+        // buffer rolled over — some messages unrecoverable
+        // oldest recoverable seq is result.OldestRecoverable
+    }
     // session is active again, sequence continues from result.ResumePoint
 }
 ```
@@ -145,6 +151,7 @@ go test ./... -v
 # specific package
 go test ./session/... -v
 go test ./handshake/... -v
+go test ./transport/sender/... -v
 go test ./transport/tcp/... -v
 go test ./transport/websocket/... -v
 go test ./store/memory/... -v
@@ -173,8 +180,11 @@ Core protocol is complete and tested:
 - [x] Monotonic message sequencing with sliding window deduplication
 - [x] RESUME handshake with resume point negotiation
 - [x] HMAC-SHA256 signed resume tokens with constant-time verification
+- [x] Outbound buffer with retransmission on resume
+- [x] Partial recovery signaling when buffer rolls over
 - [x] TCP transport adapter with binary message framing
 - [x] WebSocket transport adapter with JSON framing
+- [x] Sender — atomic sequence assignment, delivery, and buffering in one call
 - [x] In-memory session store
 - [x] File-backed session store with atomic writes and restart persistence
 - [x] End-to-end integration test proving disconnect and resume
@@ -185,4 +195,4 @@ Core protocol is complete and tested:
 
 ## License
 
-MIT License
+MIT

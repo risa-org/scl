@@ -569,6 +569,54 @@ caller can resend them on the new connection.
 
 ---
 
+### Stage 16 — Sender: Atomic Sequence, Delivery, and Buffering
+**File:** `transport/sender/sender.go`
+**Commit:** `feat: add Sender to collapse Next(), Send(), and Sent() into one correct call`
+**Tests:** 6 new tests, all passing.
+
+**Problem:**
+The outbound buffer introduced in Stage 15 had a footgun.
+Callers had to do three things manually:
+
+    seq := sequencer.Next()
+    adapter.Send(transport.Message{Seq: seq, Payload: payload})
+    sequencer.Sent(seq, payload) // easy to forget
+
+Two bugs were possible:
+1. Forgetting Sent() entirely — buffer stays empty, retransmission silently does nothing
+2. Sent() called even when Send() failed — phantom messages in the retransmit queue
+   that were never actually delivered
+
+**Fix:**
+New package transport/sender with a Sender type that wraps a Sequencer
+and a transport.Adapter together.
+
+    s := sender.New(seq, tcp.New(conn))
+    s.Send([]byte("hello")) // seq assigned, delivered, buffered — atomically
+
+Sent() is only recorded if the transport send succeeds. A failed send
+is not buffered. There is nothing for callers to forget.
+
+**Key decisions:**
+- New package not a method on Sequencer — Sender depends on both session
+  and transport packages. Sequencer cannot import transport without
+  creating a circular dependency. New package is the clean solution.
+- Sequencer() and Adapter() accessors — callers still need to reach
+  Receive(), Disconnected(), LastDelivered(), Retransmit() etc.
+  Accessors expose the underlying types without breaking encapsulation.
+- mockAdapter in tests — Sender tests don't use real TCP. Mock adapter
+  records sent messages and can be configured to fail on the Nth call.
+  Clean, fast, deterministic.
+
+**What changed for callers:**
+Before: three calls, two possible bugs
+After: one call, zero possible bugs
+
+examples/basic/main.go updated to use Sender throughout.
+README updated with Sender in project structure, quick example, and status.
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
