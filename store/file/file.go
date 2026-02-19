@@ -100,6 +100,15 @@ func (s *Store) Count() int {
 	return len(s.sessions)
 }
 
+// Flush explicitly persists current in-memory state to disk.
+// Call this at key moments — disconnect, graceful shutdown — to
+// ensure sequencer positions are durable between Create/Delete calls.
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flush()
+}
+
 // load reads sessions from the JSON file into memory.
 // Called once at startup. If the file doesn't exist, returns nil — empty store.
 func (s *Store) load() error {

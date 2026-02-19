@@ -46,7 +46,6 @@ func TestCreateAndGet(t *testing.T) {
 func TestPersistenceAcrossRestart(t *testing.T) {
 	path := tempPath(t)
 
-	// first store — create a session
 	store1, err := New(path)
 	if err != nil {
 		t.Fatalf("failed to create store1: %v", err)
@@ -57,18 +56,17 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to create session: %v", err)
 	}
 
-	// simulate some message delivery
+	// simulate message delivery
 	seq.Validate(1)
 	seq.Validate(2)
 	seq.Validate(3)
 
-	// flush by creating another session (triggers flush)
-	// actually we need to flush the state — update sess and flush manually
-	store1.mu.Lock()
-	store1.flush()
-	store1.mu.Unlock()
+	// explicit flush — as would happen on disconnect
+	if err := store1.Flush(); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
 
-	// second store — simulates server restart, loads from same file
+	// simulate restart
 	store2, err := New(path)
 	if err != nil {
 		t.Fatalf("failed to create store2: %v", err)
