@@ -71,10 +71,12 @@ func (sq *Sequencer) LastDelivered() uint64 {
 // of what the client last acked and what the server last delivered.
 // After this, the sequencer continues from where it left off.
 func (sq *Sequencer) ResumeTo(lastDelivered uint64) error {
-    if lastDelivered >= sq.nextSeq {
+    // you cannot resume beyond what has already been delivered
+    // resuming forward would silently skip messages
+    if lastDelivered > sq.lastDelivered {
         return fmt.Errorf(
-            "invalid resume point %d: ahead of next outgoing seq %d",
-            lastDelivered, sq.nextSeq,
+            "invalid resume point %d: ahead of last delivered %d",
+            lastDelivered, sq.lastDelivered,
         )
     }
     sq.lastDelivered = lastDelivered

@@ -81,34 +81,34 @@ func TestValidateDropViolation(t *testing.T) {
 }
 
 func TestValidateWindowEdge(t *testing.T) {
-    // test 1: seq exactly at window edge from zero should deliver
-    sq1 := NewSequencer()
-    verdict := sq1.Validate(64)
-    if verdict != Deliver {
-        t.Errorf("expected Deliver for seq 64 (window edge), got %v", verdict)
-    }
+	// test 1: seq exactly at window edge from zero should deliver
+	sq1 := NewSequencer()
+	verdict := sq1.Validate(64)
+	if verdict != Deliver {
+		t.Errorf("expected Deliver for seq 64 (window edge), got %v", verdict)
+	}
 
-    // test 2: seq one beyond window from zero should violate
-    sq2 := NewSequencer()
-    verdict = sq2.Validate(65)
-    if verdict != DropViolation {
-        t.Errorf("expected DropViolation for seq 65 (beyond window), got %v", verdict)
-    }
+	// test 2: seq one beyond window from zero should violate
+	sq2 := NewSequencer()
+	verdict = sq2.Validate(65)
+	if verdict != DropViolation {
+		t.Errorf("expected DropViolation for seq 65 (beyond window), got %v", verdict)
+	}
 }
 
 func TestResumeTo(t *testing.T) {
 	sq := NewSequencer()
 
-	sq.Next() // seq 1 sent
-	sq.Next() // seq 2 sent
-	sq.Next() // seq 3 sent
+	// simulate receiving and delivering messages 1 through 3
+	sq.Validate(1)
+	sq.Validate(2)
+	sq.Validate(3)
 
-	// resume to seq 2 — client got up to 2
+	// resume to 2 — client got up to 2, server delivered up to 3
 	err := sq.ResumeTo(2)
 	if err != nil {
 		t.Errorf("expected no error on valid resume, got: %v", err)
 	}
-
 	if sq.LastDelivered() != 2 {
 		t.Errorf("expected lastDelivered 2 after resume, got %d", sq.LastDelivered())
 	}
@@ -117,11 +117,11 @@ func TestResumeTo(t *testing.T) {
 func TestResumeToInvalidPoint(t *testing.T) {
 	sq := NewSequencer()
 
-	sq.Next() // only seq 1 has been assigned
+	sq.Validate(5) // lastDelivered is now 5
 
-	// trying to resume to seq 5 when we've only sent up to 1 is invalid
-	err := sq.ResumeTo(5)
+	// resuming to 6 — ahead of what was delivered — should fail
+	err := sq.ResumeTo(6)
 	if err == nil {
-		t.Error("expected error when resuming ahead of sent messages, got nil")
+		t.Error("expected error when resuming ahead of last delivered, got nil")
 	}
 }
