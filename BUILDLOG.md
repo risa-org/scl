@@ -398,6 +398,16 @@ Constant-time comparison prevents timing attacks.
 
 ---
 
+### Stage 10 — GitHub Actions CI
+**File:** `.github/workflows/ci.yml`
+**Commit:** `ci: add GitHub Actions workflow to run tests on push and PR`
+
+Runs `go test ./... -v` on every push to master and every PR targeting master.
+Green tick confirmed on first run. Tests now run automatically — no manual
+checks needed before merging.
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
