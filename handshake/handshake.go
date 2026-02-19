@@ -123,6 +123,14 @@ func (h *Handler) Disconnect(sessionID string) error {
 		)
 	}
 
+	// if the store supports persistence, flush now.
+	// disconnect is the moment sequencer durability matters most.
+	if f, ok := h.store.(Flushable); ok {
+		if err := f.Flush(); err != nil {
+			return fmt.Errorf("failed to flush store on disconnect: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -140,4 +148,11 @@ func min(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+// Flushable is optionally implemented by stores that persist state.
+// Handler calls Flush() after marking a session disconnected so that
+// sequencer positions are durable before the session goes dark.
+type Flushable interface {
+	Flush() error
 }
