@@ -55,14 +55,20 @@ Resume point = `min(client_last_ack, server_last_delivered)`. Server is authorit
 
 ```
 scl/
-├── session/          # Core: state machine, lifecycle, policy TTLs, token signing
-├── handshake/        # RESUME protocol logic
-├── transport/        # Adapter interface every transport must satisfy
-│   └── tcp/          # TCP adapter with message framing
-└── integration/      # End-to-end tests proving the full stack works
+├── session/               # Core: state machine, lifecycle, policy TTLs, token signing
+├── handshake/             # RESUME protocol logic
+├── transport/             # Adapter interface every transport must satisfy
+│   ├── tcp/               # TCP adapter with binary message framing
+│   └── websocket/         # WebSocket adapter with JSON framing
+├── store/
+│   ├── memory/            # In-memory SessionStore — fast, lost on restart
+│   └── file/              # File-backed SessionStore — survives restarts
+├── integration/           # End-to-end tests proving the full stack works
+└── examples/
+    └── basic/             # Runnable example: connect, disconnect, resume
 ```
 
-**Key rule:** `session/` and `handshake/` never import `transport/`. Core logic never knows about networking. Transport adapters depend on core, not the other way around.
+**Key rule:** `session/` and `handshake/` never import `transport/` or `store/`. Core logic never knows about networking or persistence. Adapters depend on core, not the other way around.
 
 ---
 
@@ -85,34 +91,37 @@ Sessions are not promises — they expire. Three built-in policies:
 //    In production load this from an environment variable or secrets manager.
 issuer, _ := session.NewRandomTokenIssuer()
 
-// 2. Create a session manager and handshake handler
-manager := NewSessionManager()
-handler := handshake.NewHandler(manager, issuer)
+// 2. Choose a store — memory for single-process, file for persistence
+store := memory.New()
+// or: store, _ := file.New("sessions.json")
 
-// 3. Create a session when client first connects
-sess, seq, _ := manager.Create(session.Interactive)
+// 3. Create a handshake handler
+handler := handshake.NewHandler(store, issuer)
+
+// 4. Create a session when client first connects
+sess, seq, _ := store.Create(session.Interactive)
 sess.Transition(session.StateActive)
 
-// 4. Issue a signed token — send this to the client once at session creation.
+// 5. Issue a signed token — send this to the client once at session creation.
 //    The client stores it and presents it on every reconnect attempt.
 token := issuer.Issue(sess.ID)
 
-// 5. Wrap your TCP connection in an adapter
+// 6. Wrap your connection in an adapter — TCP or WebSocket
 conn, _ := net.Dial("tcp", "localhost:9000")
 adapter := tcp.New(conn)
 
-// 6. Send messages — seq numbers assigned automatically
+// 7. Send messages — seq numbers assigned automatically
 adapter.Send(transport.Message{
     Seq:     seq.Next(),
     Payload: []byte("hello"),
 })
 
-// 7. When connection drops, mark session disconnected
+// 8. When connection drops, mark session disconnected
 handler.Disconnect(sess.ID)
 
 // --- On reconnect ---
 
-// 8. Client sends RESUME with its signed token
+// 9. Client sends RESUME with its signed token
 result := handler.Resume(handshake.ResumeRequest{
     SessionID:         sess.ID,
     LastAckFromServer: lastAck,
@@ -137,10 +146,13 @@ go test ./... -v
 go test ./session/... -v
 go test ./handshake/... -v
 go test ./transport/tcp/... -v
+go test ./transport/websocket/... -v
+go test ./store/memory/... -v
+go test ./store/file/... -v
 go test ./integration/... -v
 ```
 
-No external dependencies. No network ports required — transport tests use `net.Pipe()`.
+Core packages have no external dependencies. The WebSocket adapter depends on `nhooyr.io/websocket` — isolated to `transport/websocket/` only.
 
 ---
 
@@ -161,18 +173,16 @@ Core protocol is complete and tested:
 - [x] Monotonic message sequencing with sliding window deduplication
 - [x] RESUME handshake with resume point negotiation
 - [x] HMAC-SHA256 signed resume tokens with constant-time verification
-- [x] TCP transport adapter with message framing
+- [x] TCP transport adapter with binary message framing
+- [x] WebSocket transport adapter with JSON framing
+- [x] In-memory session store
+- [x] File-backed session store with atomic writes and restart persistence
 - [x] End-to-end integration test proving disconnect and resume
 - [x] Working example in `examples/basic/`
-
-In progress:
-
-- [ ] WebSocket transport adapter
-- [ ] Session persistence beyond in-memory
-- [ ] GitHub Actions CI
+- [x] GitHub Actions CI
 
 ---
 
 ## License
 
-MIT
+MIT License
