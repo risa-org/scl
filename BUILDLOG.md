@@ -288,17 +288,50 @@ concrete. This is how "same core logic, swappable backends" actually works in co
 
 ---
 
+### Stage 5 — TCP Transport Adapter
+**File:** `transport/tcp/tcp.go`
+**Commit:** `feat: TCP transport adapter with message framing, read loop, and disconnect signaling`
+**Tests:** `transport/tcp/tcp_test.go` — 5 tests, all passing. First networking code in the project.
+
+**What it does:**
+Implements the Adapter interface over a raw TCP connection. First code that
+touches actual sockets. Handles message framing, concurrent reads and writes,
+clean shutdown, and disconnect signaling.
+
+**Wire format:**
+```
+[8 bytes: Seq uint64 big-endian][4 bytes: payload length uint32][N bytes: payload]
+```
+TCP is a stream protocol with no message boundaries. Without explicit framing,
+a Read() call can return half a message or two joined together. This format
+lets us always reconstruct exactly one message at a time.
+
+**Key decisions:**
+
+- `io.ReadFull` not `conn.Read` — Read() on TCP can return fewer bytes than
+  asked even without error. ReadFull keeps reading until it has exactly what
+  you asked for or the connection dies. Always use this for exact byte reads.
+- `writeMu sync.Mutex` — TCP connections are not safe for concurrent writes.
+  Without this lock two goroutines calling Send() simultaneously would
+  interleave bytes on the wire and corrupt both messages.
+- `sync.Once` for Close() — close gets called from the readLoop defer AND
+  from external callers. Without Once you'd close twice and get an error.
+- Buffered channels — incoming buffered at 64, disconnect at 1. Without
+  buffering the readLoop blocks every time the caller is slow. 64 gives
+  breathing room. Disconnect only ever fires once so 1 is enough.
+- `net.Pipe()` in tests — gives an in-memory TCP-like connection with no
+  real ports needed. Tests run fast, work offline, no cleanup required.
+
+**No bugs caught — first try green.**
+
+---
+
 ## Up Next
 
-### Stage 5 — TCP Adapter
-**File:** `transport/tcp/tcp.go`
-
-First real transport. Implements the Adapter interface over a raw TCP connection.
-First code in the project that touches actual sockets and networking.
-Uses goroutines and channels — most Go-intensive code so far.
-
 ### Stage 6 — Integration Test
-A real disconnect and reconnect over TCP. The moment the whole thing becomes real.
+A real end-to-end test: two sides connected over TCP, messages flowing,
+a forced disconnect, and a successful RESUME. The moment the entire
+stack works together for the first time.
 
 ---
 
