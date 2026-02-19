@@ -488,6 +488,42 @@ verifies session and lastDelivered are correctly restored.
 
 ---
 
+### Stage 14 — Fix File Store Flush and Sequencer Durability
+**Commit:** `fix: add Flush() to file store, fix test smell, flush on disconnect via Flushable interface`
+
+**Problem:**
+Two issues discovered in code review:
+
+1. `TestPersistenceAcrossRestart` reached inside private implementation
+   by calling `store1.mu.Lock()` and `store1.flush()` directly from test
+   code. Tests should not touch private fields — code smell.
+
+2. Real durability gap: sequencer state only flushed to disk on Create()
+   and Delete(). Between those calls, Validate() updates memory but not
+   disk. Server crash between Create and Delete loses all message delivery
+   progress. For Durable sessions that's a meaningful broken guarantee.
+
+**Fixes:**
+
+- `store/file/file.go` — added public `Flush()` method. Explicit control
+  over persistence without exposing private internals.
+
+- `handshake/handshake.go` — added `Flushable` interface. Handler checks
+  if store implements it on Disconnect() and calls Flush() if so.
+  Memory store ignores it. File store handles it. No widening of
+  SessionStore interface — correct Go idiom for optional behavior.
+
+- `store/file/file_test.go` — TestPersistenceAcrossRestart now uses
+  public Flush() instead of reaching into private fields.
+
+**The guarantee is now honest:**
+- Session identity survives restart ✓
+- Sequencer position is durable at disconnect ✓
+- Crash between messages loses progress since last flush — acceptable
+  tradeoff, not a silent lie
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
