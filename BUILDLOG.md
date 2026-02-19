@@ -524,6 +524,51 @@ Two issues discovered in code review:
 
 ---
 
+### Stage 15 — Outbound Buffer and Retransmission
+**Commit:** `feat: outbound buffer with retransmission and partial recovery on resume`
+**Tests:** 4 new tests, all passing. 56 total across 8 packages.
+
+**Problem:**
+The guarantee was incomplete. On resume both sides agreed on a resume
+point, but any messages the server sent after that point and before the
+disconnect were silently gone. Server had no record of them. Client
+never received them. Nobody knew.
+
+At-most-once was working. No-message-loss was not.
+
+**Fix:**
+Outbound buffer added to Sequencer — a fixed-size circular buffer
+(256 messages by default) holding sent-but-not-yet-acked messages.
+
+On resume, handshake calls Retransmit(resumePoint) and gets back
+everything the client missed. Result carries those messages so the
+caller can resend them on the new connection.
+
+**Three recovery outcomes on resume:**
+- Full recovery — all missed messages still in buffer, retransmit list complete
+- Partial recovery — buffer rolled over, some messages permanently lost,
+  OldestRecoverable tells client where recovery actually starts
+- Nothing to retransmit — client was fully caught up before disconnect
+
+**Key design decisions:**
+- Buffer lives on Sequencer — it already owns outgoing seq numbers,
+  right place to also own outgoing message history
+- Fixed size (256) — bounds memory explicitly, no unbounded growth
+- Eviction is silent — oldest message dropped when buffer full,
+  Retransmit returns full=false so caller knows there's a gap
+- Payload copied on store — buffer doesn't retain references to
+  caller's buffers, prevents subtle memory bugs
+- SentMessage exported — handshake needs to pass messages up to caller
+  without importing concrete types from session internals
+
+**The guarantee is now honest and complete:**
+- No duplicates ✓
+- Continuous sequence numbers ✓
+- Missed messages retransmitted on resume (within buffer window) ✓
+- Permanent loss surfaced explicitly, not silently swallowed ✓
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
