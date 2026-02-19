@@ -13,8 +13,7 @@ import (
 )
 
 // -------------------------------------------------------
-// SessionManager — same as in integration tests.
-// In a real app this would persist to a database.
+// SessionManager
 // -------------------------------------------------------
 
 type entry struct {
@@ -62,8 +61,16 @@ func main() {
 	fmt.Println()
 
 	// --- Setup ---
+
+	// In production the secret comes from an environment variable or secrets manager.
+	// NewRandomTokenIssuer generates a fresh secret on each run — fine for this example.
+	issuer, err := session.NewRandomTokenIssuer()
+	if err != nil {
+		panic(err)
+	}
+
 	manager := newSessionManager()
-	handler := handshake.NewHandler(manager)
+	handler := handshake.NewHandler(manager, issuer)
 
 	// Create a session with Interactive policy (5 min TTL)
 	sess, seq, err := manager.Create(session.Interactive)
@@ -72,10 +79,14 @@ func main() {
 	}
 	sess.Transition(session.StateActive)
 
+	// Issue the HMAC-signed token — client stores this for reconnect
+	token := issuer.Issue(sess.ID)
+
 	fmt.Printf("Session created\n")
 	fmt.Printf("  ID:     %s\n", sess.ID)
 	fmt.Printf("  Policy: %s\n", sess.Policy.Name)
-	fmt.Printf("  State:  %v\n", stateName(sess.State))
+	fmt.Printf("  State:  %s\n", stateName(sess.State))
+	fmt.Printf("  Token:  %s...\n", token[:16]) // show first 16 chars only
 	fmt.Println()
 
 	// --- First connection ---
@@ -85,7 +96,6 @@ func main() {
 	server := tcp.New(serverConn)
 	client := tcp.New(clientConn)
 
-	// server reads incoming messages in a goroutine
 	received := make(chan transport.Message, 32)
 	go func() {
 		for msg := range server.Receive() {
@@ -93,7 +103,6 @@ func main() {
 		}
 	}()
 
-	// send 4 messages
 	for i := 0; i < 4; i++ {
 		msg := transport.Message{
 			Seq:     seq.Next(),
@@ -103,7 +112,6 @@ func main() {
 		fmt.Printf("  → sent   seq=%d payload=%q\n", msg.Seq, msg.Payload)
 	}
 
-	// receive and validate on server
 	for i := 0; i < 4; i++ {
 		select {
 		case msg := <-received:
@@ -145,10 +153,12 @@ func main() {
 		}
 	}()
 
+	// client presents its HMAC-signed token — server verifies without
+	// knowing the session ID was valid just from the token alone
 	result := handler.Resume(handshake.ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: lastAck,
-		ResumeToken:       sess.ID,
+		ResumeToken:       token,
 		RequestedAt:       time.Now(),
 	})
 
@@ -194,13 +204,14 @@ func main() {
 	fmt.Println()
 	fmt.Println("Sequence numbers were continuous across the disconnect.")
 	fmt.Println("No gaps. No resets. No duplicates.")
+	fmt.Println("Token was HMAC-signed — session ID alone is not enough to hijack.")
 
 	client2.Close()
 	server2.Close()
 }
 
 // -------------------------------------------------------
-// Helpers for readable output
+// Helpers
 // -------------------------------------------------------
 
 func stateName(s session.SessionState) string {

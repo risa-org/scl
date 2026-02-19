@@ -8,24 +8,21 @@ import (
 )
 
 // ResumeRequest is what the client sends when reconnecting.
-// It carries everything the server needs to decide whether to restore the session.
 type ResumeRequest struct {
-	SessionID         string // which session the client wants to resume
-	LastAckFromServer uint64 // highest seq the client actually received from server
-	ResumeToken       string // opaque token issued at session creation, proves ownership
+	SessionID         string
+	LastAckFromServer uint64
+	ResumeToken       string
 	RequestedAt       time.Time
 }
 
 // ResumeResult is what the handshake returns after processing a request.
-// Either the session is restored and Active, or it's rejected with a reason.
 type ResumeResult struct {
 	Accepted    bool
-	ResumePoint uint64 // agreed seq to resume from — min(client_ack, server_delivered)
-	Reason      string // populated on rejection, empty on success
+	ResumePoint uint64
+	Reason      string
 }
 
-// RejectionReason constants — clear, named reasons for rejection.
-// This feeds directly into observability.
+// Rejection reason constants.
 const (
 	ReasonSessionNotFound    = "session_not_found"
 	ReasonSessionExpired     = "session_expired"
@@ -35,32 +32,30 @@ const (
 )
 
 // SessionStore is the interface the handshake uses to look up sessions.
-// We define it as an interface here so the handshake package doesn't need
-// to know anything about how sessions are stored — memory, Redis, whatever.
-// This is called dependency inversion — depend on behavior, not implementation.
 type SessionStore interface {
 	Get(sessionID string) (*session.Session, *session.Sequencer, bool)
 }
 
 // Handler processes RESUME requests.
-// It holds a reference to the store but nothing else — stateless per request.
+// It holds a reference to the store and the token issuer — stateless per request.
 type Handler struct {
-	store SessionStore
+	store  SessionStore
+	issuer *session.TokenIssuer
 }
 
-// NewHandler creates a handshake handler backed by the given store.
-func NewHandler(store SessionStore) *Handler {
-	return &Handler{store: store}
+// NewHandler creates a handshake handler backed by the given store and token issuer.
+// The issuer is used to verify resume tokens on every reconnect attempt.
+func NewHandler(store SessionStore, issuer *session.TokenIssuer) *Handler {
+	return &Handler{store: store, issuer: issuer}
 }
 
 // Resume processes a reconnect attempt.
-// This is the core of the RESUME protocol from the design doc.
 //
 // Steps:
 //  1. Look up the session
 //  2. Check it exists and isn't expired
-//  3. Check it's in a resumable state (must be Disconnected)
-//  4. Validate the resume token
+//  3. Check it's in Disconnected state
+//  4. Verify the resume token with HMAC
 //  5. Compute resume point = min(client_last_ack, server_last_delivered)
 //  6. Call ResumeTo on the sequencer
 //  7. Transition session Disconnected → Resuming → Active
@@ -77,23 +72,17 @@ func (h *Handler) Resume(req ResumeRequest) ResumeResult {
 		return reject(ReasonSessionExpired)
 	}
 
-	// step 3 — must be in Disconnected state to resume
-	// Active means it never disconnected (duplicate resume attempt)
-	// Expired/Connecting are invalid
+	// step 3 — must be Disconnected to resume
 	if sess.State != session.StateDisconnected {
 		return reject(ReasonInvalidState)
 	}
 
-	// step 4 — validate token
-	// For now this is a simple equality check.
-	// Later this becomes a cryptographic verification.
-	if req.ResumeToken != sess.ID {
+	// step 4 — verify token using HMAC, constant-time comparison
+	if err := h.issuer.Verify(sess.ID, req.ResumeToken); err != nil {
 		return reject(ReasonInvalidToken)
 	}
 
 	// step 5 — compute resume point
-	// Server's lastDelivered is authoritative.
-	// We take the minimum — the point both sides are certain about.
 	serverLastDelivered := seq.LastDelivered()
 	resumePoint := min(req.LastAckFromServer, serverLastDelivered)
 
@@ -102,10 +91,7 @@ func (h *Handler) Resume(req ResumeRequest) ResumeResult {
 		return reject(ReasonInvalidResumePoint)
 	}
 
-	// step 7 — transition session state
-	// Disconnected → Resuming → Active
-	// Two transitions because Resuming is a distinct observable state.
-	// Something could go wrong between these — auth hook, resource check, etc.
+	// step 7 — transition Disconnected → Resuming → Active
 	if ok := sess.Transition(session.StateResuming); !ok {
 		return reject(ReasonInvalidState)
 	}
@@ -122,27 +108,8 @@ func (h *Handler) Resume(req ResumeRequest) ResumeResult {
 	}
 }
 
-// reject is a helper to build a clean rejection result with a reason.
-func reject(reason string) ResumeResult {
-	return ResumeResult{
-		Accepted: false,
-		Reason:   reason,
-	}
-}
-
-// min returns the smaller of two uint64 values.
-// Go 1.21+ has a built-in min, but we define it explicitly for clarity
-// and compatibility with earlier versions.
-func min(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // Disconnect marks a session as disconnected.
 // Called by the transport adapter when it detects a connection drop.
-// Returns an error if the session can't be found or isn't in a valid state.
 func (h *Handler) Disconnect(sessionID string) error {
 	sess, _, ok := h.store.Get(sessionID)
 	if !ok {
@@ -157,4 +124,20 @@ func (h *Handler) Disconnect(sessionID string) error {
 	}
 
 	return nil
+}
+
+// reject builds a clean rejection result with a reason.
+func reject(reason string) ResumeResult {
+	return ResumeResult{
+		Accepted: false,
+		Reason:   reason,
+	}
+}
+
+// min returns the smaller of two uint64 values.
+func min(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
 }

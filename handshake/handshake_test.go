@@ -7,8 +7,12 @@ import (
 	"github.com/risa-org/scl/session"
 )
 
+// testIssuer returns a consistent TokenIssuer for tests.
+func testIssuer() *session.TokenIssuer {
+	return session.NewTokenIssuer([]byte("test-secret-key"))
+}
+
 // inMemoryStore is a simple in-memory SessionStore for testing.
-// This is exactly the kind of fake the design doc calls for in testing support.
 type inMemoryStore struct {
 	sessions   map[string]*session.Session
 	sequencers map[string]*session.Sequencer
@@ -34,7 +38,7 @@ func (s *inMemoryStore) Get(sessionID string) (*session.Session, *session.Sequen
 	return sess, s.sequencers[sessionID], true
 }
 
-// helper: creates a session already in Disconnected state, ready to resume
+// disconnectedSession creates a session already in Disconnected state, ready to resume.
 func disconnectedSession(store *inMemoryStore, policy session.Policy) *session.Session {
 	sess, _ := session.NewSession(policy)
 	seq := session.NewSequencer()
@@ -48,14 +52,15 @@ func disconnectedSession(store *inMemoryStore, policy session.Policy) *session.S
 
 func TestResumeSuccess(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
 
 	sess := disconnectedSession(store, session.Interactive)
 
 	result := handler.Resume(ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: 0,
-		ResumeToken:       sess.ID, // token = ID for now
+		ResumeToken:       issuer.Issue(sess.ID),
 		RequestedAt:       time.Now(),
 	})
 
@@ -72,11 +77,11 @@ func TestResumeSuccess(t *testing.T) {
 
 func TestResumeSessionNotFound(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	handler := NewHandler(store, testIssuer())
 
 	result := handler.Resume(ResumeRequest{
 		SessionID:   "nonexistent-id",
-		ResumeToken: "nonexistent-id",
+		ResumeToken: testIssuer().Issue("nonexistent-id"),
 		RequestedAt: time.Now(),
 	})
 
@@ -90,15 +95,15 @@ func TestResumeSessionNotFound(t *testing.T) {
 
 func TestResumeExpiredSession(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
 
 	sess := disconnectedSession(store, session.Interactive)
-	// backdate to simulate TTL exceeded
 	sess.CreatedAt = time.Now().Add(-10 * time.Minute)
 
 	result := handler.Resume(ResumeRequest{
 		SessionID:   sess.ID,
-		ResumeToken: sess.ID,
+		ResumeToken: issuer.Issue(sess.ID),
 		RequestedAt: time.Now(),
 	})
 
@@ -112,9 +117,9 @@ func TestResumeExpiredSession(t *testing.T) {
 
 func TestResumeWrongState(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
 
-	// session is Active, not Disconnected — resume should be rejected
 	sess, _ := session.NewSession(session.Interactive)
 	seq := session.NewSequencer()
 	sess.Transition(session.StateActive)
@@ -122,7 +127,7 @@ func TestResumeWrongState(t *testing.T) {
 
 	result := handler.Resume(ResumeRequest{
 		SessionID:   sess.ID,
-		ResumeToken: sess.ID,
+		ResumeToken: issuer.Issue(sess.ID),
 		RequestedAt: time.Now(),
 	})
 
@@ -136,13 +141,13 @@ func TestResumeWrongState(t *testing.T) {
 
 func TestResumeInvalidToken(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	handler := NewHandler(store, testIssuer())
 
 	sess := disconnectedSession(store, session.Interactive)
 
 	result := handler.Resume(ResumeRequest{
 		SessionID:   sess.ID,
-		ResumeToken: "wrong-token",
+		ResumeToken: "forged-token",
 		RequestedAt: time.Now(),
 	})
 
@@ -156,12 +161,12 @@ func TestResumeInvalidToken(t *testing.T) {
 
 func TestResumePointIsMinOfClientAndServer(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
 
 	sess, _ := session.NewSession(session.Interactive)
 	seq := session.NewSequencer()
 
-	// simulate server having delivered up to seq 10
 	seq.Validate(1)
 	seq.Validate(2)
 	seq.Validate(10)
@@ -170,18 +175,16 @@ func TestResumePointIsMinOfClientAndServer(t *testing.T) {
 	sess.Transition(session.StateDisconnected)
 	store.Add(sess, seq)
 
-	// client only got up to seq 7
 	result := handler.Resume(ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: 7,
-		ResumeToken:       sess.ID,
+		ResumeToken:       issuer.Issue(sess.ID),
 		RequestedAt:       time.Now(),
 	})
 
 	if !result.Accepted {
 		t.Errorf("expected resume accepted, got rejected: %s", result.Reason)
 	}
-	// resume point should be 7 — the min of 7 and 10
 	if result.ResumePoint != 7 {
 		t.Errorf("expected resume point 7, got %d", result.ResumePoint)
 	}
@@ -189,7 +192,7 @@ func TestResumePointIsMinOfClientAndServer(t *testing.T) {
 
 func TestDisconnect(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	handler := NewHandler(store, testIssuer())
 
 	sess, _ := session.NewSession(session.Interactive)
 	seq := session.NewSequencer()
@@ -207,7 +210,7 @@ func TestDisconnect(t *testing.T) {
 
 func TestDisconnectUnknownSession(t *testing.T) {
 	store := newInMemoryStore()
-	handler := NewHandler(store)
+	handler := NewHandler(store, testIssuer())
 
 	err := handler.Disconnect("ghost-session")
 	if err == nil {
