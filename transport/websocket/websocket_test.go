@@ -101,6 +101,7 @@ func TestWebSocketDisconnectSignal(t *testing.T) {
 	defer server.Close()
 
 	client.Close()
+	time.Sleep(50 * time.Millisecond) // let close frame propagate
 
 	select {
 	case event := <-server.Disconnected():
