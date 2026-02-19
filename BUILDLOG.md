@@ -359,13 +359,13 @@ This is the runtime glue between the handshake and the session layer.
 
 ---
 
-### Stage 7 — README
-**File:** `README.md`
-**Commit:** `docs: add README with problem statement, architecture, and usage example`
+### Stage 8 — Basic Example
+**File:** `examples/basic/main.go`
+**Commit:** `feat: basic example showing full connect, disconnect, and resume flow`
 
-Covers: what it is, why it exists, how it works, project structure,
-session policies, quick usage example, how to run tests, what it is not,
-and current status checklist. Sharp and honest — no overselling.
+Runnable program demonstrating the complete flow with terminal output at
+every step. Sequence numbers visible: 1-4 pre-disconnect, 5-7 post-resume.
+Continuous across the boundary — exactly what the project promises.
 
 ---
 
