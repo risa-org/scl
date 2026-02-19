@@ -359,11 +359,13 @@ This is the runtime glue between the handshake and the session layer.
 
 ---
 
-## Up Next
-
 ### Stage 7 — README
-The project now works. Time to explain it to the world.
-What it is, why it exists, how to use it, how to run the tests.
+**File:** `README.md`
+**Commit:** `docs: add README with problem statement, architecture, and usage example`
+
+Covers: what it is, why it exists, how it works, project structure,
+session policies, quick usage example, how to run tests, what it is not,
+and current status checklist. Sharp and honest — no overselling.
 
 ---
 
