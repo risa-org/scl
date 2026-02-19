@@ -408,6 +408,33 @@ checks needed before merging.
 
 ---
 
+### Stage 11 — Memory Store
+**Issue:** #3
+**Branch:** `feat/issue-3-memory-store`
+**File:** `store/memory/memory.go`
+**Commit:** `feat: add store/memory package and remove duplicated SessionManager (closes #3)`
+**Tests:** 5 new tests, all passing. 42 total across 6 packages.
+
+**What it does:**
+Thread-safe in-memory implementation of handshake.SessionStore.
+Importable as a real package — users don't have to write boilerplate
+storage just to get started with SCL.
+
+**Methods:** New(), Create(), Get(), Delete(), Count()
+
+**Side effect:**
+Removed duplicated SessionManager from examples/basic/main.go and
+integration/integration_test.go. Both now import store/memory directly.
+One implementation, two consumers, no copies.
+
+**Decision:**
+Added as a user convenience, not a core requirement. SCL's job is the
+protocol. The store is the simplest possible starting point for anyone
+building on top of it.
+```
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
