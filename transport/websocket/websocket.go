@@ -106,10 +106,13 @@ func (a *Adapter) readLoop() {
 }
 
 // signalDisconnect sends exactly one disconnect event.
+// StatusNormalClosure and StatusGoingAway are both treated as clean closes —
+// different WebSocket implementations use either when shutting down gracefully.
 func (a *Adapter) signalDisconnect(err error) {
 	event := transport.DisconnectEvent{}
 
-	if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+	status := websocket.CloseStatus(err)
+	if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway {
 		event.Reason = transport.ReasonClosedClean
 	} else if a.ctx.Err() != nil {
 		// context cancelled — we closed it ourselves
