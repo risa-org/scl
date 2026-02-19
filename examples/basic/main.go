@@ -3,90 +3,43 @@ package main
 import (
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/risa-org/scl/handshake"
 	"github.com/risa-org/scl/session"
+	"github.com/risa-org/scl/store/memory"
 	"github.com/risa-org/scl/transport"
 	"github.com/risa-org/scl/transport/tcp"
 )
-
-// -------------------------------------------------------
-// SessionManager
-// -------------------------------------------------------
-
-type entry struct {
-	sess *session.Session
-	seq  *session.Sequencer
-}
-
-type SessionManager struct {
-	mu      sync.RWMutex
-	entries map[string]*entry
-}
-
-func newSessionManager() *SessionManager {
-	return &SessionManager{entries: make(map[string]*entry)}
-}
-
-func (m *SessionManager) Create(policy session.Policy) (*session.Session, *session.Sequencer, error) {
-	sess, err := session.NewSession(policy)
-	if err != nil {
-		return nil, nil, err
-	}
-	seq := session.NewSequencer()
-	m.mu.Lock()
-	m.entries[sess.ID] = &entry{sess: sess, seq: seq}
-	m.mu.Unlock()
-	return sess, seq, nil
-}
-
-func (m *SessionManager) Get(sessionID string) (*session.Session, *session.Sequencer, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	e, ok := m.entries[sessionID]
-	if !ok {
-		return nil, nil, false
-	}
-	return e.sess, e.seq, true
-}
-
-// -------------------------------------------------------
-// Main
-// -------------------------------------------------------
 
 func main() {
 	fmt.Println("=== SCL Basic Example ===")
 	fmt.Println()
 
 	// --- Setup ---
-
-	// In production the secret comes from an environment variable or secrets manager.
-	// NewRandomTokenIssuer generates a fresh secret on each run — fine for this example.
 	issuer, err := session.NewRandomTokenIssuer()
 	if err != nil {
 		panic(err)
 	}
 
-	manager := newSessionManager()
-	handler := handshake.NewHandler(manager, issuer)
+	store := memory.New()
+	handler := handshake.NewHandler(store, issuer)
 
 	// Create a session with Interactive policy (5 min TTL)
-	sess, seq, err := manager.Create(session.Interactive)
+	sess, seq, err := store.Create(session.Interactive)
 	if err != nil {
 		panic(err)
 	}
 	sess.Transition(session.StateActive)
 
-	// Issue the HMAC-signed token — client stores this for reconnect
+	// Issue signed token — client stores this for reconnect
 	token := issuer.Issue(sess.ID)
 
 	fmt.Printf("Session created\n")
 	fmt.Printf("  ID:     %s\n", sess.ID)
 	fmt.Printf("  Policy: %s\n", sess.Policy.Name)
 	fmt.Printf("  State:  %s\n", stateName(sess.State))
-	fmt.Printf("  Token:  %s...\n", token[:16]) // show first 16 chars only
+	fmt.Printf("  Token:  %s...\n", token[:16])
 	fmt.Println()
 
 	// --- First connection ---
@@ -153,8 +106,6 @@ func main() {
 		}
 	}()
 
-	// client presents its HMAC-signed token — server verifies without
-	// knowing the session ID was valid just from the token alone
 	result := handler.Resume(handshake.ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: lastAck,
@@ -209,10 +160,6 @@ func main() {
 	client2.Close()
 	server2.Close()
 }
-
-// -------------------------------------------------------
-// Helpers
-// -------------------------------------------------------
 
 func stateName(s session.SessionState) string {
 	switch s {
