@@ -457,6 +457,37 @@ in code with two real backends.
 
 ---
 
+### Stage 13 — File-Backed Session Store
+**Issue:** #7
+**Branch:** `feat/issue-7-file-store`
+**File:** `store/file/file.go`
+**Commit:** `feat: file-backed session store with atomic writes and restart persistence (closes #7)`
+**Tests:** 5 tests, all passing. 52 total across 8 packages.
+
+**What it does:**
+Persists sessions to a JSON file on disk. Sessions survive server restarts.
+Loads from file on startup, flushes to disk on every Create and Delete.
+Get reads from memory only — no disk hit on the hot path.
+
+**Key decisions:**
+- Atomic writes — write to .tmp file then rename. Rename is atomic on most
+  systems. Process crash mid-write leaves the original file intact.
+- Memory + disk — in-memory map is the read cache. Disk is the source of
+  truth on restart. Best of both: fast reads, durable writes.
+- RestoreLastDelivered() added to Sequencer — needed to reconstruct
+  sequencer state from persisted lastDeliveredSeq without going through
+  normal validation path.
+
+**Not suitable for:**
+Multi-process deployments. Two processes writing the same file will
+corrupt it. Use Redis or Postgres for that — out of scope for this project.
+
+**TestPersistenceAcrossRestart** — key test. Creates a session, delivers
+messages, simulates restart by loading a second store from the same file,
+verifies session and lastDelivered are correctly restored.
+
+---
+
 ## Core Principles (Running List)
 
 - Core logic never imports transport packages
