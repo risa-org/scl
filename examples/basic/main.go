@@ -55,7 +55,10 @@ func main() {
 		}
 	}()
 
-	// Send via Sender — seq assignment, delivery, and buffering in one call
+	// sender.Send does three things atomically:
+	//   1. seq.Next() — assign sequence number
+	//   2. adapter.Send() — deliver via transport
+	//   3. seq.Sent() — record in outbound buffer (only on success)
 	for i := 0; i < 4; i++ {
 		payload := []byte(fmt.Sprintf("message %d", i+1))
 		seqNum, err := clientSender.Send(payload)
@@ -65,12 +68,28 @@ func main() {
 		fmt.Printf("  → sent   seq=%d payload=%q\n", seqNum, payload)
 	}
 
+	// hold payloads so we can deliver pending ones in order
+	heldPayloads := make(map[uint64][]byte)
+
 	for i := 0; i < 4; i++ {
 		select {
 		case msg := <-received:
 			verdict := seq.Validate(msg.Seq)
 			fmt.Printf("  ← received seq=%d payload=%q verdict=%s\n",
 				msg.Seq, msg.Payload, verdictName(verdict))
+
+			switch verdict {
+			case session.Deliver:
+				// deliver this message, then check if pending ones unblocked
+				fmt.Printf("     delivered seq=%d\n", msg.Seq)
+				for _, s := range seq.FlushPending() {
+					fmt.Printf("     flushed pending seq=%d payload=%q\n", s, heldPayloads[s])
+					delete(heldPayloads, s)
+				}
+			case session.DeliverPending:
+				// hold for later — will be signaled via FlushPending
+				heldPayloads[msg.Seq] = msg.Payload
+			}
 		case <-time.After(2 * time.Second):
 			panic("timed out waiting for message")
 		}
@@ -80,7 +99,7 @@ func main() {
 		seq.LastDelivered(), sess.ReconnectCount)
 	fmt.Println()
 
-	// --- Simulate disconnect ---
+	// --- Simulate network drop ---
 	fmt.Println("--- Network Drop ---")
 
 	lastAck := seq.LastDelivered()
@@ -90,7 +109,7 @@ func main() {
 
 	fmt.Printf("  connection dropped\n")
 	fmt.Printf("  session state: %s\n", stateName(sess.State))
-	fmt.Printf("  last ack: %d\n", lastAck)
+	fmt.Printf("  last ack:      %d\n", lastAck)
 	fmt.Println()
 
 	// --- Reconnect with RESUME ---
@@ -118,21 +137,23 @@ func main() {
 	}
 
 	fmt.Printf("  RESUME accepted\n")
-	fmt.Printf("  resume point: %d\n", result.ResumePoint)
-	fmt.Printf("  session state: %s\n", stateName(sess.State))
+	fmt.Printf("  resume point:    %d\n", result.ResumePoint)
+	fmt.Printf("  session state:   %s\n", stateName(sess.State))
 	fmt.Printf("  reconnect count: %d\n", sess.ReconnectCount)
 
-	// retransmit any messages the server sent that the client missed
+	// retransmit anything the client missed
 	if len(result.Retransmit) > 0 {
 		fmt.Printf("  retransmitting %d missed messages\n", len(result.Retransmit))
 		for _, m := range result.Retransmit {
 			clientSender2.Adapter().Send(transport.Message{Seq: m.Seq, Payload: m.Payload})
 		}
 	} else {
-		fmt.Printf("  no missed messages to retransmit\n")
+		fmt.Printf("  no missed messages — client was fully caught up\n")
 	}
+
 	if result.Partial {
-		fmt.Printf("  WARNING: partial recovery — oldest recoverable seq=%d\n", result.OldestRecoverable)
+		fmt.Printf("  WARNING: partial recovery — oldest recoverable seq=%d\n",
+			result.OldestRecoverable)
 	}
 	fmt.Println()
 
@@ -154,6 +175,11 @@ func main() {
 			verdict := seq.Validate(msg.Seq)
 			fmt.Printf("  ← received seq=%d payload=%q verdict=%s\n",
 				msg.Seq, msg.Payload, verdictName(verdict))
+			if verdict == session.Deliver {
+				for _, s := range seq.FlushPending() {
+					fmt.Printf("     flushed pending seq=%d\n", s)
+				}
+			}
 		case <-time.After(2 * time.Second):
 			panic("timed out waiting for post-resume message")
 		}
@@ -168,6 +194,8 @@ func main() {
 	fmt.Println()
 	fmt.Println("Sequence numbers were continuous across the disconnect.")
 	fmt.Println("No gaps. No resets. No duplicates.")
+	fmt.Println("Out-of-order messages held in pending map, delivered in sequence order.")
+	fmt.Println("Missed messages retransmitted from outbound ring buffer.")
 	fmt.Println("Token was HMAC-signed — session ID alone is not enough to hijack.")
 	fmt.Println("Sender ensured buffer is always consistent with what was delivered.")
 
@@ -196,6 +224,8 @@ func verdictName(v session.DeliveryVerdict) string {
 	switch v {
 	case session.Deliver:
 		return "DELIVER"
+	case session.DeliverPending:
+		return "DELIVER_PENDING (held)"
 	case session.DropDuplicate:
 		return "DROP(duplicate)"
 	case session.DropViolation:

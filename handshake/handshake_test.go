@@ -7,12 +7,10 @@ import (
 	"github.com/risa-org/scl/session"
 )
 
-// testIssuer returns a consistent TokenIssuer for tests.
 func testIssuer() *session.TokenIssuer {
 	return session.NewTokenIssuer([]byte("test-secret-key"))
 }
 
-// inMemoryStore is a simple in-memory SessionStore for testing.
 type inMemoryStore struct {
 	sessions   map[string]*session.Session
 	sequencers map[string]*session.Sequencer
@@ -38,7 +36,6 @@ func (s *inMemoryStore) Get(sessionID string) (*session.Session, *session.Sequen
 	return sess, s.sequencers[sessionID], true
 }
 
-// disconnectedSession creates a session already in Disconnected state, ready to resume.
 func disconnectedSession(store *inMemoryStore, policy session.Policy) *session.Session {
 	sess, _ := session.NewSession(policy)
 	seq := session.NewSequencer()
@@ -47,8 +44,6 @@ func disconnectedSession(store *inMemoryStore, policy session.Policy) *session.S
 	store.Add(sess, seq)
 	return sess
 }
-
-// --- Tests ---
 
 func TestResumeSuccess(t *testing.T) {
 	store := newInMemoryStore()
@@ -167,14 +162,18 @@ func TestResumePointIsMinOfClientAndServer(t *testing.T) {
 	sess, _ := session.NewSession(session.Interactive)
 	seq := session.NewSequencer()
 
-	seq.Validate(1)
-	seq.Validate(2)
-	seq.Validate(10)
+	// deliver contiguous messages 1 through 10 so lastDelivered = 10
+	// (with the reorder buffer, non-contiguous seqs go to pending
+	// and don't advance lastDelivered — so we must use contiguous seqs here)
+	for i := uint64(1); i <= 10; i++ {
+		seq.Validate(i)
+	}
 
 	sess.Transition(session.StateActive)
 	sess.Transition(session.StateDisconnected)
 	store.Add(sess, seq)
 
+	// client only acked up to 7 — resume point should be min(7, 10) = 7
 	result := handler.Resume(ResumeRequest{
 		SessionID:         sess.ID,
 		LastAckFromServer: 7,

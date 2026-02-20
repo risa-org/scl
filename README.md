@@ -23,7 +23,7 @@ transport lifetime ≠ session identity
 A session survives across multiple underlying connections. The transport changes. The identity doesn't.
 
 **One guarantee:**
-> Ordered, at-most-once message delivery across transient disconnects — within a bounded session lifetime. Missed messages are retransmitted on resume.
+> Ordered, at-most-once message delivery across transient disconnects — within a bounded session lifetime. Missed messages are retransmitted on resume. Out-of-order messages are held and delivered in sequence order regardless of transport.
 
 ---
 
@@ -34,7 +34,7 @@ Application
     ↑
 Session Continuity Layer
     ↑
-Transport Adapter (TCP / QUIC / WebSocket)
+Transport Adapter (TCP / WebSocket / UDP / any)
     ↑
 Network
 ```
@@ -47,7 +47,13 @@ Server → Client:  RESUME_OK { resume_point, retransmit_list }
                or RESUME_REJECT { reason }
 ```
 
-Resume point = `min(client_last_ack, server_last_delivered)`. Server is authoritative. Both sides resync from the last point they both agree on. Sequence numbers continue from where they left off — no gaps, no resets, no duplicates. Any messages the client missed are retransmitted from the server's outbound buffer.
+Resume point = `min(client_last_ack, server_last_delivered)`. Server is authoritative. Both sides resync from the last point they both agree on. Sequence numbers continue from where they left off — no gaps, no resets, no duplicates. Messages the client missed are retransmitted from the server's outbound ring buffer.
+
+### Out-of-order delivery
+
+The sequencer handles out-of-order delivery correctly. If seq 5 arrives before seq 3, seq 5 is held in a pending map and returns `DeliverPending`. When seq 3 arrives it returns `Deliver`, and `FlushPending()` returns any now-unblocked seqs. Seq 3 is never lost just because 5 arrived first.
+
+This makes the sequencer correct for any transport — TCP, WebSocket, UDP, or custom — regardless of whether the transport guarantees ordering.
 
 ---
 
@@ -104,9 +110,10 @@ sess, seq, _ := store.Create(session.Interactive)
 sess.Transition(session.StateActive)
 
 // 5. Issue a signed token — send this to the client once at session creation.
+//    The client stores it and presents it on every reconnect attempt.
 token := issuer.Issue(sess.ID)
 
-// 6. Wrap your connection in a Sender — handles seq, delivery, and buffering
+// 6. Wrap your connection in a Sender — handles seq, delivery, and buffering atomically
 conn, _ := net.Dial("tcp", "localhost:9000")
 s := sender.New(seq, tcp.New(conn))
 
@@ -114,16 +121,35 @@ s := sender.New(seq, tcp.New(conn))
 s.Send([]byte("hello"))
 s.Send([]byte("world"))
 
-// 8. When connection drops, mark session disconnected
+// 8. Receive and validate incoming messages
+for msg := range serverAdapter.Receive() {
+    verdict := seq.Validate(msg.Seq)
+    switch verdict {
+    case session.Deliver:
+        // deliver message, then drain any now-unblocked pending
+        for _, s := range seq.FlushPending() {
+            // deliver held payloads for these seqs
+            _ = s
+        }
+    case session.DeliverPending:
+        // hold payload — gap exists, waiting for earlier seq
+    case session.DropDuplicate:
+        // already delivered, discard
+    case session.DropViolation:
+        // beyond window, reject
+    }
+}
+
+// 9. When connection drops, mark session disconnected
 handler.Disconnect(sess.ID)
 
 // --- On reconnect ---
 
-// 9. Client sends RESUME with its signed token
+// 10. Client sends RESUME with its signed token
 result := handler.Resume(handshake.ResumeRequest{
     SessionID:         sess.ID,
     LastAckFromServer: lastAck,
-    ResumeToken:       token,
+    ResumeToken:       token, // HMAC-SHA256 signed — session ID alone is not enough
     RequestedAt:       time.Now(),
 })
 
@@ -148,7 +174,7 @@ if result.Accepted {
 # all tests across all packages
 go test ./... -v
 
-# specific package
+# specific packages
 go test ./session/... -v
 go test ./handshake/... -v
 go test ./transport/sender/... -v
@@ -178,18 +204,23 @@ Core protocol is complete and tested:
 
 - [x] Session state machine with lifecycle transitions
 - [x] Monotonic message sequencing with sliding window deduplication
+- [x] Reorder buffer — out-of-order messages held and delivered in sequence order
 - [x] RESUME handshake with resume point negotiation
 - [x] HMAC-SHA256 signed resume tokens with constant-time verification
-- [x] Outbound buffer with retransmission on resume
+- [x] Outbound ring buffer with retransmission on resume
 - [x] Partial recovery signaling when buffer rolls over
 - [x] TCP transport adapter with binary message framing
 - [x] WebSocket transport adapter with JSON framing
 - [x] Sender — atomic sequence assignment, delivery, and buffering in one call
 - [x] In-memory session store
 - [x] File-backed session store with atomic writes and restart persistence
-- [x] End-to-end integration test proving disconnect and resume
+- [x] Disconnect flushes file store — sequencer position durable before session goes dark
+- [x] End-to-end integration tests covering all guarantees
 - [x] Working example in `examples/basic/`
 - [x] GitHub Actions CI
+- [x] `FlushPending()` correctly returns seqs drained when a gap fills
+- [x] `ResumeTo()` handles forward resume — no spurious rejection on server state lag
+- [x] `Ack(seq)` trims outbound buffer mid-session — buffer size bounded without disconnect
 
 ---
 
