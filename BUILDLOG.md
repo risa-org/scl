@@ -888,3 +888,73 @@ an application-level ack from the remote peer.
 - Sequence numbers never reset, ever
 - Sessions are not promises — rejection on reconnect is valid
 - Observability is first class — reconnect count, session age, last disconnect reason
+
+---
+
+### Stage 21 — Production Hardening: Sequencer Concurrency, Resume Staleness, and OCS Docs
+**Files:** `session/sequence.go`, `session/sequence_concurrency_test.go`, `handshake/handshake.go`, `handshake/handshake_test.go`, `transport/websocket/websocket.go`, `README.md`, `docs/production.md`
+**Commit:** `feat: harden resume and sequencer concurrency safety` + docs follow-up
+**Tests:** `go test ./...` and `go test -race ./...` passing.
+
+**What changed:**
+
+1. **Sequencer concurrency safety**
+   - Added a `sync.Mutex` inside `Sequencer` and guarded all stateful methods
+     (`Next`, `Sent`, `Retransmit`, `Ack`, `OldestRecoverable`, `Validate`,
+     `FlushPending`, `LastDelivered`, `PendingCount`, `ResumeTo`, `RestoreLastDelivered`).
+   - Added `TestSequencerConcurrentAccess` to stress mixed concurrent send/ack/
+     validate/read paths and confirm retransmit buffer bounds hold.
+
+2. **Handshake stale request control**
+   - Added `ReasonStaleRequest` and `DefaultMaxResumeAge`.
+   - Added `SetMaxResumeAge(d time.Duration)` on `Handler`.
+   - `Resume` now rejects stale requests when `RequestedAt` is older than configured max age.
+   - Added tests for stale rejection and disabled age-check behavior.
+
+3. **WebSocket close classification hardening**
+   - Treated `StatusNoStatusRcvd` as clean close, preventing false network-error
+     classification in normal local close propagation paths.
+
+4. **Documentation upgrades (OCS)**
+   - README now includes a production hardening section focused on
+     Operations, Controls, and Safety (OCS).
+   - Added `docs/production.md` with a practical deployment checklist,
+     observability targets, controls, and release readiness checks.
+
+**Why this stage matters:**
+
+This stage shifts SCL from “correct protocol core” toward “deployable runtime
+component.” The critical improvement is not one specific API — it is reducing
+operational risk under real concurrency and reconnect behavior while documenting
+how to run the system safely in production.
+
+---
+
+### Stage 22 — Concrete Operations Runbook + Alerting Templates
+**Files:** `docs/runbook.md`, `docs/alerts.md`, `docs/production.md`, `README.md`
+**Commit:** `docs: add concrete runbook and alerting templates`
+**Tests:** `go test ./...` and `go test -race ./...` passing.
+
+**What changed:**
+
+- Added `docs/runbook.md` as an actionable operations template with:
+  - SLO definitions
+  - dashboard requirements
+  - alert starter set
+  - incident triage workflow
+  - common incident playbooks
+  - rollback/recovery steps
+  - post-incident review template
+
+- Added `docs/alerts.md` with concrete metric naming suggestions and
+  Prometheus-style alert rule examples for resume failure spikes, invalid-token
+  anomalies, and partial recovery elevation.
+
+- Updated `docs/production.md` to reference the new companion operational docs.
+- Updated README production hardening section to link directly to runbook and alert docs.
+
+**Why this stage matters:**
+
+A protocol can be correct and still fail in production without operational
+muscle memory. This stage adds that missing layer: concrete, reusable operating
+artifacts that reduce mean-time-to-detect and mean-time-to-recover.

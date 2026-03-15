@@ -71,6 +71,7 @@ scl/
 │   ├── memory/            # In-memory SessionStore — fast, lost on restart
 │   └── file/              # File-backed SessionStore — survives restarts
 ├── integration/           # End-to-end tests proving the full stack works
+├── docs/                  # Deployment, runbook, and alerting guidance
 └── examples/
     └── basic/             # Runnable example: connect, disconnect, resume
 ```
@@ -195,6 +196,38 @@ Core packages have no external dependencies. The WebSocket adapter depends on `n
 - Not a congestion control or flow control system
 - Not an auth system — auth hooks plug in at the handshake boundary
 - Not tied to any one language or deployment model
+
+---
+
+
+## Production Hardening (OCS: Operations, Controls, Safety)
+
+If you are deploying SCL in production, treat these as required controls:
+
+- **Operations**
+  - Instrument resume outcomes (`accepted/rejected` by reason), retransmit counts, and partial recovery rate.
+  - Alert on spikes in `session_not_found`, `invalid_token`, and `stale_request`.
+- **Controls**
+  - Configure resume staleness checks (`DefaultMaxResumeAge` or `SetMaxResumeAge`) to reject replayed/old resume attempts.
+  - Use `Ack(seq)` during long-lived sessions to trim retransmit buffers proactively.
+- **Safety**
+  - Keep token secrets in a secret manager, not source code.
+  - Enforce max payload sizes at the transport boundary.
+  - Prefer durable store backends for restart-sensitive workloads.
+
+```go
+handler := handshake.NewHandler(store, issuer)
+handler.SetMaxResumeAge(90 * time.Second) // tighten replay window
+
+// when your app-level protocol receives ack N from peer:
+seq.Ack(N)
+```
+
+For a full deployment checklist, see `docs/production.md`.
+
+Operational templates:
+- Runbook template: `docs/runbook.md`
+- Metrics + alerts reference: `docs/alerts.md`
 
 ---
 

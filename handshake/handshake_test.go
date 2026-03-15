@@ -154,6 +154,48 @@ func TestResumeInvalidToken(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsStaleRequest(t *testing.T) {
+	store := newInMemoryStore()
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
+
+	sess := disconnectedSession(store, session.Interactive)
+
+	result := handler.Resume(ResumeRequest{
+		SessionID:         sess.ID,
+		LastAckFromServer: 0,
+		ResumeToken:       issuer.Issue(sess.ID),
+		RequestedAt:       time.Now().Add(-(DefaultMaxResumeAge + time.Second)),
+	})
+
+	if result.Accepted {
+		t.Fatal("expected stale request to be rejected")
+	}
+	if result.Reason != ReasonStaleRequest {
+		t.Fatalf("expected reason %q, got %q", ReasonStaleRequest, result.Reason)
+	}
+}
+
+func TestResumeAllowsStaleTimestampWhenAgeCheckDisabled(t *testing.T) {
+	store := newInMemoryStore()
+	issuer := testIssuer()
+	handler := NewHandler(store, issuer)
+	handler.SetMaxResumeAge(0)
+
+	sess := disconnectedSession(store, session.Interactive)
+
+	result := handler.Resume(ResumeRequest{
+		SessionID:         sess.ID,
+		LastAckFromServer: 0,
+		ResumeToken:       issuer.Issue(sess.ID),
+		RequestedAt:       time.Now().Add(-24 * time.Hour),
+	})
+
+	if !result.Accepted {
+		t.Fatalf("expected request to be accepted when age check disabled, got reason=%q", result.Reason)
+	}
+}
+
 func TestResumePointIsMinOfClientAndServer(t *testing.T) {
 	store := newInMemoryStore()
 	issuer := testIssuer()

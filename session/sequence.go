@@ -1,5 +1,7 @@
 package session
 
+import "sync"
+
 const DefaultWindowSize uint64 = 64
 const DefaultBufferSize int = 256
 
@@ -15,6 +17,7 @@ const DefaultBufferSize int = 256
 // fixed-size ring buffer for retransmission on resume. The ring buffer uses
 // a fixed backing array with head/tail indices — no GC pressure from re-slicing.
 type Sequencer struct {
+	mu            sync.Mutex
 	nextSeq       uint64          // next number to assign to an outgoing message
 	lastDelivered uint64          // highest contiguous seq delivered — the window's left edge
 	windowSize    uint64          // how far ahead we will accept, bounds memory
@@ -38,6 +41,9 @@ func NewSequencer() *Sequencer {
 // Next assigns a sequence number to an outgoing message.
 // Numbers are monotonic and never repeat.
 func (sq *Sequencer) Next() uint64 {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	seq := sq.nextSeq
 	sq.nextSeq++
 	return seq
@@ -46,6 +52,9 @@ func (sq *Sequencer) Next() uint64 {
 // Sent records a message in the outbound buffer after a confirmed send.
 // Only called by Sender after the transport successfully delivered the message.
 func (sq *Sequencer) Sent(seq uint64, payload []byte) {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	sq.outbound.store(seq, payload)
 }
 
@@ -60,6 +69,9 @@ type SentMessage struct {
 // If full is false, the ring buffer has rolled over — some messages between
 // fromSeq and OldestRecoverable() are permanently gone.
 func (sq *Sequencer) Retransmit(fromSeq uint64) ([]SentMessage, bool) {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	return sq.outbound.since(fromSeq)
 }
 
@@ -70,11 +82,17 @@ func (sq *Sequencer) Retransmit(fromSeq uint64) ([]SentMessage, bool) {
 // Call this whenever the remote peer sends an ack (e.g. during a long-lived
 // session) to bound the outbound buffer size independent of disconnects.
 func (sq *Sequencer) Ack(seq uint64) {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	sq.outbound.trim(seq)
 }
 
 // Returns 0 if the buffer is empty.
 func (sq *Sequencer) OldestRecoverable() uint64 {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	return sq.outbound.oldestSeq()
 }
 
@@ -109,6 +127,9 @@ const (
 // This makes the sequencer correct for any transport — TCP, WebSocket, UDP,
 // or anything else — regardless of whether it guarantees ordering.
 func (sq *Sequencer) Validate(seq uint64) DeliveryVerdict {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	// duplicate: already delivered
 	if seq <= sq.lastDelivered {
 		return DropDuplicate
@@ -155,6 +176,9 @@ func (sq *Sequencer) Validate(seq uint64) DeliveryVerdict {
 //	    heldPayloads[msg.Seq] = msg.Payload
 //	}
 func (sq *Sequencer) FlushPending() []uint64 {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	if len(sq.drained) == 0 {
 		return nil
 	}
@@ -181,11 +205,17 @@ func (sq *Sequencer) drainPending() {
 
 // LastDelivered returns the highest contiguous sequence number delivered.
 func (sq *Sequencer) LastDelivered() uint64 {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	return sq.lastDelivered
 }
 
 // PendingCount returns the number of out-of-order messages currently held.
 func (sq *Sequencer) PendingCount() int {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	return len(sq.pending)
 }
 
@@ -194,6 +224,9 @@ func (sq *Sequencer) PendingCount() int {
 // resumePoint may be ahead of lastDelivered (e.g. when the server's receive window
 // is behind the client's ack position); in that case we simply advance forward.
 func (sq *Sequencer) ResumeTo(lastDelivered uint64) error {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	sq.lastDelivered = lastDelivered
 	sq.pending = make(map[uint64]bool)
 	sq.drained = sq.drained[:0]
@@ -203,6 +236,9 @@ func (sq *Sequencer) ResumeTo(lastDelivered uint64) error {
 // RestoreLastDelivered sets lastDelivered directly during store restoration.
 // Only called when loading persisted sessions.
 func (sq *Sequencer) RestoreLastDelivered(lastDelivered uint64) {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+
 	sq.lastDelivered = lastDelivered
 	sq.pending = make(map[uint64]bool)
 }
