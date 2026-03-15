@@ -2,6 +2,8 @@ package websocket
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,5 +135,33 @@ func TestWebSocketSendOnClosedReturnsError(t *testing.T) {
 	err := client.Send(transport.Message{Seq: 1, Payload: []byte("test")})
 	if err == nil {
 		t.Error("expected error sending on closed connection, got nil")
+	}
+}
+
+func TestClassifyDisconnectTreatsEOFAsClean(t *testing.T) {
+	event := classifyDisconnect(io.EOF, nil)
+	if event.Reason != transport.ReasonClosedClean {
+		t.Fatalf("expected clean close for EOF, got %v", event.Reason)
+	}
+	if event.Err != nil {
+		t.Fatalf("expected nil event.Err for clean close, got %v", event.Err)
+	}
+}
+
+func TestClassifyDisconnectTreatsContextCancelAsClean(t *testing.T) {
+	event := classifyDisconnect(errors.New("read canceled"), context.Canceled)
+	if event.Reason != transport.ReasonClosedClean {
+		t.Fatalf("expected clean close when context canceled, got %v", event.Reason)
+	}
+}
+
+func TestClassifyDisconnectTreatsUnknownErrorAsNetwork(t *testing.T) {
+	err := errors.New("unexpected transport failure")
+	event := classifyDisconnect(err, nil)
+	if event.Reason != transport.ReasonNetworkError {
+		t.Fatalf("expected network error for unknown failure, got %v", event.Reason)
+	}
+	if !errors.Is(event.Err, err) {
+		t.Fatalf("expected event.Err to wrap original error")
 	}
 }

@@ -2,6 +2,10 @@ package websocket
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
+	"strings"
 	"sync"
 
 	"github.com/risa-org/scl/transport"
@@ -94,22 +98,35 @@ func (a *Adapter) readLoop() {
 // different WebSocket implementations and shutdown timing produce either code.
 // Context cancellation means we closed it ourselves — also clean.
 func (a *Adapter) signalDisconnect(err error) {
+	event := classifyDisconnect(err, a.ctx.Err())
+
+	select {
+	case a.disconnect <- event:
+	default:
+	}
+}
+
+func classifyDisconnect(err error, ctxErr error) transport.DisconnectEvent {
 	event := transport.DisconnectEvent{}
+	errStr := ""
+	if err != nil {
+		errStr = strings.ToLower(err.Error())
+	}
 
 	status := websocket.CloseStatus(err)
 	switch {
 	case status == websocket.StatusNormalClosure,
 		status == websocket.StatusGoingAway,
 		status == websocket.StatusNoStatusRcvd,
-		a.ctx.Err() != nil:
+		ctxErr != nil,
+		errors.Is(err, io.EOF),
+		errors.Is(err, net.ErrClosed),
+		strings.Contains(errStr, "use of closed network connection"):
 		event.Reason = transport.ReasonClosedClean
 	default:
 		event.Reason = transport.ReasonNetworkError
 		event.Err = err
 	}
 
-	select {
-	case a.disconnect <- event:
-	default:
-	}
+	return event
 }
