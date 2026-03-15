@@ -100,6 +100,7 @@ func (a *Adapter) signalDisconnect(err error) {
 	switch {
 	case status == websocket.StatusNormalClosure,
 		status == websocket.StatusGoingAway,
+		status == websocket.StatusNoStatusRcvd,
 		a.ctx.Err() != nil:
 		event.Reason = transport.ReasonClosedClean
 	default:

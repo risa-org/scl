@@ -38,7 +38,10 @@ const (
 	ReasonInvalidState       = "invalid_state"
 	ReasonInvalidToken       = "invalid_token"
 	ReasonInvalidResumePoint = "invalid_resume_point"
+	ReasonStaleRequest       = "stale_request"
 )
+
+const DefaultMaxResumeAge = 2 * time.Minute
 
 // SessionStore is the interface the handshake uses to look up sessions.
 type SessionStore interface {
@@ -52,17 +55,30 @@ type Flushable interface {
 
 // Handler processes RESUME requests.
 type Handler struct {
-	store  SessionStore
-	issuer *session.TokenIssuer
+	store        SessionStore
+	issuer       *session.TokenIssuer
+	maxResumeAge time.Duration
 }
 
 // NewHandler creates a handshake handler backed by the given store and token issuer.
 func NewHandler(store SessionStore, issuer *session.TokenIssuer) *Handler {
-	return &Handler{store: store, issuer: issuer}
+	return &Handler{store: store, issuer: issuer, maxResumeAge: DefaultMaxResumeAge}
+}
+
+// SetMaxResumeAge configures how old a resume request timestamp may be.
+// A zero or negative value disables age checks.
+func (h *Handler) SetMaxResumeAge(d time.Duration) {
+	h.maxResumeAge = d
 }
 
 // Resume processes a reconnect attempt.
 func (h *Handler) Resume(req ResumeRequest) ResumeResult {
+	if h.maxResumeAge > 0 && !req.RequestedAt.IsZero() {
+		if time.Since(req.RequestedAt) > h.maxResumeAge {
+			return reject(ReasonStaleRequest)
+		}
+	}
+
 	sess, seq, ok := h.store.Get(req.SessionID)
 	if !ok {
 		return reject(ReasonSessionNotFound)
